@@ -28,17 +28,19 @@
 网页端自身通过 `www.doubao.com/passport/...` 同源代理访问 `accounts.doubao.com` 的 passport 服务。
 本插件统一请求 `www.doubao.com`，避免跨域 Cookie 与额外域名。
 
-## 2. 自包含网页 OAuth 登录（默认，已实测到授权页 / 回调）
+## 2. 自包含网页 OAuth 登录（默认：Playwright 打开官方授权页）
 
-默认登录不再由插件自己画二维码，而是**直接打开抖音官方授权页**，本地只接收 OAuth 回调：
+默认登录不再由插件自己画二维码，而是用 Playwright 打开豆包聊天页 → 自动点开登录弹窗 → 进入抖音官方授权页：
 
 ```
-浏览器打开：
-  https://open.douyin.com/platform/oauth/connect
-    ?client_key=aw4293rjg7ggbx9m&client_id=aw4293rjg7ggbx9m
-    &redirect_uri=http%3A%2F%2F127.0.0.1%3A19100%2Fdouyin%2Fcallback
-    &response_type=code&scope=user_info%2Cmobile&optionalScope=mobile%2C1
-    &state=<base64(JSON{entry,trackMeta,platform:"aweme_v2",navigatePath,type:"login",timestamp,csrfToken})>
+Playwright（系统 Edge/Chrome）
+  → https://www.doubao.com/chat/
+  → 点击 登录 → 抖音一键登录 → 同意
+  → 浏览器进入 https://open.douyin.com/platform/oauth/connect
+      ?client_key=aw4293rjg7ggbx9m&client_id=aw4293rjg7ggbx9m
+      &redirect_uri=https%3A%2F%2Fwww.doubao.com%2Fauth%2Fcallback
+      &response_type=code&scope=user_info%2Cmobile&optionalScope=mobile%2C1
+      &state=<base64(JSON)>   （state 由豆包登录弹窗生成）
 
 抖音页面展示官方授权二维码（也提供“验证码授权”）：
   二维码解码结果：
@@ -47,10 +49,21 @@
     &token=<一次性 token>&optional_scope_check=mobile...
   ← 这是真正的抖音 App 授权二维码，不是豆包下载码 / 豆包扫码登录码
 
-用户扫码或短信验证码授权后：
-  GET http://127.0.0.1:19100/douyin/callback?code=<one-time code>&state=<same state>
-  → 插件校验 state，用 code 调豆包 passport 换会话
+用户授权后：
+  https://www.doubao.com/auth/callback?code=...&state=...
+  → 豆包官方页面自己完成 code 换票，写入 sessionid 等 Cookie
+  → 插件从 BrowserContext 提取 Cookie，关闭浏览器
 ```
+
+### 2.0 关键实测结论：redirect_uri 不能用 localhost
+
+- 把 `redirect_uri` 改成 `http://127.0.0.1:19100/douyin/callback` 时，授权页能正常展示二维码，
+  但用户扫码后抖音提示 **“非法重定向链接”**。
+- 把 `redirect_uri` 改回 `https://www.doubao.com/auth/callback` 后，授权正常；回调落在豆包官方页面。
+- 即使拦截官方 callback 拿到 `code`，在 Node 端重放
+  `POST /passport/web/auth/bind_with_mobile_login/` 也会返回 `error_code:22「非法应用」`
+  （缺少官方页面的 CSRF / 设备上下文）。因此本插件不重放 code，而是让官方页面完成换票后提取 Cookie。
+
 
 ### 2.1 授权页背后的接口（页面实测）
 
@@ -72,10 +85,10 @@ GET https://open.douyin.com/oauth/check_qrcode/
 ```
 
 - 直接调用 `get_qrcode` 不需要 ttwid / `a_bogus`；二维码解码为 `aweme://authorizedy?...`。
-- 官方页面在 `confirmed` 后会跳转 `redirect_url`；本插件把 `redirect_uri` 换成 localhost，因此回调直接落到本机。
+- 官方页面在 `confirmed` 后会跳转 `redirect_url`（`https://www.doubao.com/auth/callback?code=...&state=...`）；插件不修改该地址，由豆包页面完成换票。
 - `redirect_uri=localhost` 已被授权页接受（实测页面正常展示二维码），无需修改抖音开放平台配置。
 
-### 2.2 code 换豆包会话
+### 2.2 code 换豆包会话（官方页面内部逻辑，插件不重放）
 
 抖音回调只给 `code`。豆包网页 callback chunk（`web-auth_callback/page.c68b0cb1.js`）的实际逻辑是：
 
@@ -109,7 +122,7 @@ POST /passport/web/auth/login/
   profile_key=<profile_key>&platform_app_id=8949
 ```
 
-> 实测（2026-10-25）：`bind_with_mobile_login` 用假 code 返回 `error_code:22「非法应用」`，说明端点存活且会校验 code / 应用；真实 code 的换票结果由 `pnpm log-in` 验证。
+> 实测（2026-10-25）：`bind_with_mobile_login` 用假 code 返回 `error_code:22「非法应用」`；用 Playwright 截获的真实 code 在 Node 端重放也返回同样的 22。官方页面在浏览器内执行同一请求时能成功，说明它依赖页面上下文（CSRF / 设备 / state）。因此插件让官方页面完成换票，只提取 Cookie。
 
 ### 2.3 备用：豆包扫码登录（`DOUBAO_LOGIN_FLOW=doubao`）
 
@@ -378,11 +391,21 @@ data: {"event_type":2003,"event_data":{}}
 
 ## 7. 验证方法
 
-1. **浏览器网络抓包**：用 Playwright 打开 `www.doubao.com/chat/`，点击登录，观测登录弹窗的 `get_qrcode` / `check_qrconnect` 请求与响应（见 `docs/` 中的实验记录）。
+1. **浏览器网络抓包**：用 Playwright 打开 `www.doubao.com/chat/`，点击登录，观测登录弹窗的 OAuth 跳转、`get_qrcode` / `check_qrconnect` 请求与响应。
 2. **纯 HTTP 复现**：直接请求 CSRF、二维码、轮询端点，确认无需浏览器 JS / `a_bogus`。
 3. **社区实现交叉验证**：`/samantha` 请求结构、`aid=582478` 参数组合与公开逆向项目一致；本仓库只采用协议事实，不复制其代码。
-4. **离线 E2E**：`pnpm test` 用 mock 豆包覆盖登录状态机、Cookie、模型映射、流式 / 非流式、回退、错误映射。
+4. **离线 E2E**：`pnpm test` 用 mock 豆包覆盖登录状态机、Cookie、模型映射、流式 / 非流式、回退、错误映射；2026-10-25 为 20 条全绿。
 5. **真实账号冒烟**：`pnpm smoke -- --yes`（消耗一次额度）。
+
+### 7.1 真实账号验证结果（2026-10-25）
+
+- `pnpm log-in`：Playwright 打开豆包登录弹窗 → 抖音官方授权页 → 用户扫码 → 豆包官方 callback 换票；插件提取 32 条 Cookie，DPAPI 落盘，uid / 昵称可读。
+- `pnpm check-auth`：`loggedIn=true`；`/passport/account/info/v2/` 未带 `a_bogus` 也返回 uid / 昵称。
+- `pnpm smoke -- --yes --model doubao-fast`：返回「收到」，`X-Doubao-Mode: web`。
+- `pnpm smoke -- --yes --model doubao-expert --prompt ...`：`reasoning_content` 有思考链，正文正常。
+- 插件直连 HTTP：`/health` 正常；`/v1/chat/completions` 流式 / 非流式均返回正确 OpenAI 结构。
+- `plugin-doubao` 已通过 WebSocket 注册并在 xrl-router 中 confirm 为 enabled。
+- 失败记录：`redirect_uri=localhost` → 抖音提示“非法重定向链接”；Node 端重放官方 code → 豆包返回 `code=22 非法应用`。因此插件使用 Playwright 让官方页面完成换票。
 
 ## 8. 已知限制
 

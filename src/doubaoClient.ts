@@ -132,6 +132,9 @@ export class DoubaoClient {
     const preset = resolveModelPreset(req.model);
     const effort = mapEffort(req.reasoningEffort, preset.reasoningEffort);
     const { prompt } = flattenMessages(req.messages);
+    if (settings.debug) {
+      console.log(`[doubao] prompt chars=${prompt.length} preview=${JSON.stringify(prompt.slice(0, 120))}`);
+    }
     const { response, kind } = await this.openChat(prompt, preset, effort, req);
     req.onMode?.(kind);
     if (!response.body) throw new DoubaoUpstreamError('豆包上游响应为空', { kind: 'upstream' });

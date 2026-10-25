@@ -2,7 +2,7 @@
  * 真实账号冒烟测试：发一条极短消息，验证登录 Cookie 与上游对话链路。
  * 会消耗一次豆包对话额度，必须显式加 --yes。
  *
- * 用法：pnpm smoke -- --yes [--model doubao-fast]
+ * 用法：pnpm smoke -- --yes [--model doubao-fast] [--prompt "..."]
  */
 
 import { getSession, initTokenManager } from '../src/auth';
@@ -22,16 +22,17 @@ async function main(): Promise<void> {
     return;
   }
   const model = argValue('--model') || DEFAULT_MODEL;
+  const prompt = argValue('--prompt') || '请只回复两个字：收到';
   const state = await getSession();
   const client = new DoubaoClient(state);
   console.log(`model=${model} mode=${client.chatMode} uid=${state.uid || '<empty>'}`);
-  console.log('发送：请只回复两个字：收到');
+  console.log(`发送：${prompt}`);
   let text = '';
   let reasoning = '';
   let mode = '';
   for await (const d of client.chat({
     model,
-    messages: [{ role: 'user', content: '请只回复两个字：收到' }],
+    messages: [{ role: 'user', content: prompt }],
     onMode: (m) => {
       mode = m;
     },

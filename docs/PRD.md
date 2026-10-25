@@ -48,9 +48,9 @@
 
 ### FR-1 抖音 OAuth 网页登录
 
-- 默认 `DOUBAO_LOGIN_FLOW=douyin`：生成一次性 state，直接打开抖音官方授权页
-- `redirect_uri` 指向本机 `127.0.0.1:<port>/douyin/callback`；页面由抖音托管，用户扫码或短信验证码授权
-- 回调校验 state；用 code 调 `bind_with_mobile_login` 换豆包会话；必要时走 `profile_key` 二次登录
+- 默认 `DOUBAO_LOGIN_FLOW=douyin`：Playwright 启动系统 Edge/Chrome，自动打开豆包登录弹窗 → 抖音官方授权页
+- 用户扫码或短信验证码授权；抖音回跳豆包官方 callback，由豆包页面自行完成 code 换票
+- 插件从浏览器上下文提取 `sessionid` 等 Cookie；关闭浏览器，不保留 profile
 - 超时（默认 5 分钟）返回明确错误
 - 备用 `DOUBAO_LOGIN_FLOW=doubao`：本机展示豆包网页登录二维码，轮询确认
 - 不读取任何豆包电脑版文件
@@ -99,9 +99,9 @@
 | 检查点 | 语义 |
 |---|---|
 | 授权页是抖音官方页面 | `open.douyin.com/platform/oauth/connect`，二维码解码为 `aweme://authorizedy?...` |
-| OAuth code 只能换一次会话 | 不把 code 当长期凭证；换票后只保留 Cookie |
-| state 必须匹配本次登录 | 不采纳其它来源的 code / state |
-| 登录成功以 `sessionid` 等会话 Cookie 落地为准 | 不以“授权页 200”或“code 返回”误判 |
+| 不能自造 redirect_uri | 抖音只接受豆包白名单 callback；localhost 会提示“非法重定向链接” |
+| 换票由官方页面完成 | 插件不重放 code，只从浏览器上下文提取会话 Cookie |
+| 登录成功以 `sessionid` 等会话 Cookie 落地为准 | 不以“授权页 200”或“页面跳回”误判 |
 | 超时 / 拒绝可重试 | 不静默失败 |
 | 不读取电脑版 | 代码中不存在 App 文件路径 / 解密逻辑 |
 
@@ -123,8 +123,8 @@
 | Cookie 罐域 / 路径 / 过期 | `test/e2e.test.ts` |
 | 凭证 AES / plain 往返 | 同上 |
 | 登录 new → scanned → confirmed → Cookie → 账号 | 同上 |
-| 抖音 OAuth 授权 URL / 本地回调 / code 换会话 | 同上 |
-| state 不匹配 / 非法 code / profile_key 回退 / 超时 | 同上 |
+| Playwright 打开豆包登录 → 抖音授权页 → 提取 Cookie | 同上 |
+| 官方 redirect_uri / 拒绝 localhost / 超时 | 同上 |
 | 备用豆包扫码登录 / 登录页二维码 / 状态 / 刷新 | 同上 |
 | 登录超时 | 同上 |
 | 认证状态 / 账号查询 / 强制重登 | 同上 |

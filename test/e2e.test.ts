@@ -1,6 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { startMockDoubao, type MockDoubao } from './helpers/mockDoubao';
@@ -227,6 +228,67 @@ test('登录超时：waitForDone 返回 error 而不是永久挂起', async () =
     assert.equal(state.status, 'error');
   } finally {
     flow.stopPolling();
+  }
+});
+
+test('抖音 OAuth：默认 redirect_uri 使用豆包官方 callback（不能用 localhost）', async () => {
+  const flow = new mods.douyinLogin.DouyinOAuthLogin({
+    baseUrl: mock.url,
+    oauthBaseUrl: 'https://open.douyin.com',
+    clientKey: 'aw4293rjg7ggbx9m',
+    device: DEVICE,
+    aid: '497858',
+  });
+  const url = await flow.begin();
+  assert.ok(url.includes(`redirect_uri=${encodeURIComponent('https://www.doubao.com/auth/callback')}`));
+  assert.ok(!url.includes('127.0.0.1'));
+  assert.equal(flow.getRedirectUri(), 'https://www.doubao.com/auth/callback');
+});
+
+test('抖音 OAuth：Playwright 打开授权页并截获官方 callback', async (t) => {
+  mock.reset();
+  const oauthServer = http.createServer((req, res) => {
+    const u = new URL(req.url || '/', 'http://127.0.0.1');
+    if (u.pathname === '/platform/oauth/connect') {
+      const state = u.searchParams.get('state') || '';
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(
+        `<html><body><script>location.href='/auth/callback?code=mock-douyin-code&state='+encodeURIComponent(${JSON.stringify(state)})</script></body></html>`,
+      );
+      return;
+    }
+    res.writeHead(404);
+    res.end('callback should be intercepted');
+  });
+  await new Promise<void>((resolve) => oauthServer.listen(0, '127.0.0.1', () => resolve()));
+  const port = (oauthServer.address() as any).port as number;
+  const oauthBase = `http://127.0.0.1:${port}`;
+  const flow = new mods.douyinLogin.DouyinOAuthLogin({
+    baseUrl: mock.url,
+    oauthBaseUrl: oauthBase,
+    clientKey: 'aw4293rjg7ggbx9m',
+    redirectUri: `${oauthBase}/auth/callback`,
+    device: DEVICE,
+    aid: '497858',
+    timeoutMs: 8000,
+    headless: true,
+  });
+  try {
+    const url = await flow.begin();
+    assert.ok(url.startsWith(`${oauthBase}/platform/oauth/connect?`));
+    const captured = await flow.captureCode(8000);
+    const state = await flow.handleCallback(captured.code, captured.state);
+    assert.equal(state.status, 'confirmed');
+    assert.equal(state.uid, '12345');
+    assert.ok(flow.getSession()?.cookies.some((c: any) => c.name === 'sessionid'));
+  } catch (e: any) {
+    if (/无法启动浏览器|browserType\.launch/.test(e.message)) {
+      t.skip(`系统浏览器不可用：${e.message}`);
+      return;
+    }
+    throw e;
+  } finally {
+    await new Promise<void>((resolve) => oauthServer.close(() => resolve()));
   }
 });
 

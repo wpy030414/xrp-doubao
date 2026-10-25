@@ -19,7 +19,7 @@ import * as store from './credentialStore';
 import { generateDeviceIdentity, normalizeDeviceIdentity, type DeviceIdentity } from './device';
 import { DoubaoWebLogin, queryDoubaoAccount } from './webLogin';
 import { DouyinOAuthLogin } from './douyinLogin';
-import { startLoginServer, startDouyinLoginServer, type LoginServer } from './loginPage';
+import { startLoginServer, type LoginServer } from './loginPage';
 import { openExternal } from './openBrowser';
 import type { DoubaoAuthState, StoredSession } from './types';
 
@@ -145,34 +145,30 @@ function persistLogin(session: StoredSession): DoubaoAuthState {
   return auth;
 }
 
-/** 抖音 OAuth：直接打开官方授权页，本地接收回调 */
+/** 抖音 OAuth：Playwright 打开官方授权页，截获回调 code 后换票 */
 async function interactiveDouyinLogin(opts: InteractiveLoginOptions): Promise<DoubaoAuthState> {
-  const flow = new DouyinOAuthLogin();
-  let server: LoginServer | null = null;
-  try {
-    server = await startDouyinLoginServer(flow, settings.loginPort);
-    const oauthUrl = await flow.begin();
-    console.log('\n=== 抖音授权登录 ===');
-    console.log(`已打开抖音官方授权页（${Math.round(settings.loginTimeoutMs / 60000)} 分钟内有效）：`);
-    console.log(`  ${oauthUrl}\n`);
-    console.log('请在浏览器中用抖音 App 扫码授权；授权完成后会自动回到本机。');
-    console.log('本流程不读取豆包电脑版的任何文件或凭证。\n');
-    console.log(`本地回调：${flow.getRedirectUri()}\n`);
-
-    opts.onLoginPage?.(oauthUrl);
-    if (opts.openBrowser !== false) openExternal(oauthUrl);
-
-    const abort = abortPromise(opts.signal);
-    const state = await (abort ? Promise.race([flow.waitForCallback(), abort]) : flow.waitForCallback());
-    if (state.status !== 'confirmed') {
-      throw new Error(state.error ? `${state.message}（${state.error}）` : state.message);
-    }
-    const session = flow.getSession();
-    if (!session) throw new Error('登录成功但未获得会话');
-    return persistLogin(session);
-  } finally {
-    if (server) await server.close().catch(() => {});
+  if (opts.openBrowser === false) {
+    throw new Error(
+      '抖音 OAuth 登录需要打开浏览器窗口以捕获回调；请去掉 --no-browser，' +
+        '或设置 DOUBAO_LOGIN_FLOW=doubao 使用本机扫码页。',
+    );
   }
+  const flow = new DouyinOAuthLogin();
+  console.log('\n=== 抖音授权登录 ===');
+  console.log(`正在打开浏览器（${Math.round(settings.loginTimeoutMs / 60000)} 分钟内有效）…`);
+  console.log('浏览器会自动进入豆包登录弹窗 → 抖音官方授权页。');
+  console.log('请在抖音页面扫码，或在页面上选择验证码授权。');
+  console.log('授权完成后插件从浏览器上下文取出豆包会话并加密落盘。');
+  console.log('本流程不读取豆包电脑版的任何文件或凭证。\n');
+
+  opts.onLoginPage?.(`${settings.douyinOauthBaseUrl}/platform/oauth/connect`);
+  const state = await flow.run({ timeoutMs: settings.loginTimeoutMs, signal: opts.signal });
+  if (state.status !== 'confirmed') {
+    throw new Error(state.error ? `${state.message}（${state.error}）` : state.message);
+  }
+  const session = flow.getSession();
+  if (!session) throw new Error('登录成功但未获得会话');
+  return persistLogin(session);
 }
 
 /** 豆包扫码：本机展示豆包网页登录二维码 */

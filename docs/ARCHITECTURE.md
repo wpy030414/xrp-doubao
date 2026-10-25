@@ -83,24 +83,27 @@ docs/
 
 ## 4. 关键数据流
 
-### 4.1 登录（默认：抖音 OAuth）
+### 4.1 登录（默认：Playwright + 抖音官方授权页）
 
 ```
 pnpm log-in
   → auth.interactiveLogin()
       → new DouyinOAuthLogin()
-      → startDouyinLoginServer(flow, 19100)   // 本地回调服务器
-      → flow.begin()                          // 生成 state + OAuth URL
-      → openExternal(open.douyin.com/...)
-      → 用户在抖音官方页扫码 / 短信验证码授权
-      → 抖音回跳 http://127.0.0.1:19100/douyin/callback?code&state
-      → flow.handleCallback(code, state)
-          GET  /passport/safe/csrf_token
-          POST /passport/web/auth/bind_with_mobile_login  (code → sessionid)
-          (profile_key) POST /passport/web/auth/login
-          GET  /passport/account/info/v2 (尽力)
+      → flow.run()
+          → launchLoginBrowser()              // playwright-core + 系统 Edge/Chrome
+          → goto www.doubao.com/chat/
+          → 自动点击 登录 → 抖音一键登录 → 同意
+          → 浏览器进入 open.douyin.com 官方授权页
+          → 用户扫码 / 短信验证码授权
+          → 抖音回跳 https://www.doubao.com/auth/callback
+          → 豆包官方页面自行完成 code 换票并写 sessionid
+          → 插件从 BrowserContext 提取 doubao.com Cookie
+          → GET /passport/account/info/v2/ (尽力)
       → auth.writeStore(session)              (DPAPI / AES)
 ```
+
+- 不能把 `redirect_uri` 改为 localhost：抖音会在授权时报“非法重定向链接”；因此换票由豆包官方页面完成，插件只提取 Cookie。
+- 浏览器仅用于登录；关闭后不保留 profile。
 
 备用（`DOUBAO_LOGIN_FLOW=doubao`）：
 

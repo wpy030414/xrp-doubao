@@ -148,6 +148,11 @@ export interface Settings {
   douyinClientKey: string;
   douyinScope: string;
   douyinOptionalScope: string;
+  /** 抖音开放平台白名单内的回调；不能用 localhost（会被判“非法重定向链接”） */
+  douyinRedirectUri: string;
+  /** Playwright 浏览器通道：空 = 按平台自动选择 */
+  browserChannel: string;
+  loginHeadless: boolean;
   loginTimeoutMs: number;
   loginPollMs: number;
   autoLogin: boolean;
@@ -204,6 +209,9 @@ export const settings: Settings = {
   douyinClientKey: env('DOUBAO_DOUYIN_CLIENT_KEY', 'aw4293rjg7ggbx9m'),
   douyinScope: env('DOUBAO_DOUYIN_SCOPE', 'user_info,mobile'),
   douyinOptionalScope: env('DOUBAO_DOUYIN_OPTIONAL_SCOPE', 'mobile,1'),
+  douyinRedirectUri: env('DOUBAO_DOUYIN_REDIRECT_URI', 'https://www.doubao.com/auth/callback'),
+  browserChannel: env('DOUBAO_BROWSER_CHANNEL', ''),
+  loginHeadless: envBool('DOUBAO_LOGIN_HEADLESS', false),
   loginTimeoutMs: parseInt(env('DOUBAO_LOGIN_TIMEOUT_MS', String(5 * 60_000)), 10),
   loginPollMs: parseInt(env('DOUBAO_LOGIN_POLL_MS', '1500'), 10),
   autoLogin: envBool('DOUBAO_AUTO_LOGIN', false),

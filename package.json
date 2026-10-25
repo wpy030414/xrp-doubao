@@ -1,0 +1,32 @@
+{
+  "name": "xrp-doubao",
+  "version": "0.1.0",
+  "private": true,
+  "description": "豆包（Doubao）网页通道的 xrl-router 插件：自包含网页扫码登录 + OpenAI Chat Completions 反代",
+  "scripts": {
+    "serve": "tsx src/index.ts",
+    "log-in": "tsx scripts/login.ts",
+    "login": "tsx scripts/login.ts",
+    "check-auth": "tsx scripts/check-auth.ts",
+    "log-out": "tsx scripts/logout.ts",
+    "logout": "tsx scripts/logout.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.8",
+    "dotenv": "^16.3.1",
+    "hono": "^4.7.4",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.6.2",
+    "typescript": "^5.3.2"
+  }
+}

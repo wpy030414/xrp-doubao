@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment variables（含凭证，永不提交）
+.env
+.env.local
+.env.*.local
+
+# 自包含凭证 / 登录页面产物
+*.session.json
+doubao-credential.json
+qr*.png
+.doubao-*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+pnpm-debug.log*
+
+# Runtime
+pids
+*.pid
+tmp/
+temp/
+*.tmp

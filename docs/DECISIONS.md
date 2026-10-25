@@ -1,0 +1,115 @@
+# DECISIONS — xrp-doubao
+
+> 记录影响结构、协议或安全边界的设计决策，以及被放弃的替代方案。
+
+## D-1 纯 HTTP 二维码登录，不引入 Playwright
+
+**决策**：登录只使用 `www.doubao.com/passport` 的 CSRF / 二维码 / 轮询接口，用 Node `fetch` + Cookie 罐完成。
+
+**原因**：
+- 实测 CSRF、二维码、`check_qrconnect` 均不需要浏览器 JS 或 `a_bogus`
+- 不引入 ~100MB 的浏览器依赖；部署只需 Node
+- 不读取豆包电脑版，不启动无头浏览器
+
+**代价**：无法自动完成手机号 / 密码 / 验证码登录；二维码必须由账号本人在手机端确认。
+
+**放弃的方案**：Playwright 驱动官方登录页并提取 Cookie。更通用，但依赖重、易受反自动化检测影响，且与“插件应轻量”冲突。
+
+## D-2 不生成 `a_bogus`，用 `/samantha` 回退
+
+**决策**：`/chat/completion` 请求不带 `a_bogus`；失败时 `auto` 模式回退 `/samantha/chat/completion`。
+
+**原因**：
+- `a_bogus` 是字节风控签名，算法随版本变化，纯 JS 复现维护成本高
+- 登录 Cookie + 完整设备参数在实测中可访问主端点；不是所有请求都需要签名
+- `/samantha` 端点在社区实现中稳定可用，足以承载文本对话
+
+**代价**：主端点被风控时延迟增加；两条链路都失败时只能等待验证 / 重新登录。
+
+**放弃的方案**：内嵌 `a_bogus` 纯算实现 / 无头浏览器 hook。两者都会显著增加复杂度和被风控概率。
+
+## D-3 无状态消息压平，不维护 conversation_id 映射
+
+**决策**：把 OpenAI `messages` 压平成一条豆包用户消息，每次请求创建新会话。
+
+**原因**：
+- 插件是 HTTP 无状态服务；客户端（Claude Code / OpenAI SDK）每次都带完整 history
+- 维护跨请求 conversation_id 需要进程内会话表、并发隔离、过期清理，且 Router 重启后丢失
+- 压平后行为可预测，便于 E2E
+
+**代价**：多轮对话的 token 效率略低；豆包侧不会保存对话历史。
+
+**放弃的方案**：按 `local_conversation_id` 维护状态。更接近网页体验，但引入服务端状态和串话风险。
+
+## D-4 Cookie 罐 + 加密凭证文件
+
+**决策**：用自实现的最小 Cookie 罐保存 domain/path/expiry；凭证整包 DPAPI/AES 加密。
+
+**原因**：
+- Node `fetch` 不自动持久化 Cookie
+- 登录回跳跨多个路径，需要收集每一跳 `Set-Cookie`
+- 凭证不仅是 `sessionid`，还有 `ttwid` / `passport_csrf_token` / `uid_tt` 等，整包保存最简单
+- DPAPI 绑本机本用户；AES 支持迁移
+
+**代价**：DPAPI 凭证不可跨机；AES 需要用户保管 passphrase。
+
+**放弃的方案**：明文 `.env` / cookie jar 文件。泄露风险高，不符合项目安全边界。
+
+## D-5 端口 19071 / 插件 ID `plugin-doubao`
+
+**决策**：插件监听 19071，Plugin ID `plugin-doubao`；登录页 19100。
+
+**原因**：与现有 xrp-* 插件端口（19065 / 19067 / 19069 / 19070）错开；ID 与插件名一致，便于 Router 确认。
+
+## D-6 内置模型预设，不动态抓取目录
+
+**决策**：在 `config.ts` 内置 5 个模型预设 + 3 个别名；`DOUBAO_MODELS` 可裁剪。
+
+**原因**：
+- 豆包没有公开的模型目录 API；模型键藏在 `/chat` 页面 SSR 的 `menu_item_list` 中
+- 登录后菜单可能随订阅 / 灰度变化，动态解析 SSR 易碎
+- 预设足够覆盖快速 / 专家 / 工作任务，且可用环境变量覆盖
+
+**代价**：豆包新增模型时需要更新预设。
+
+**放弃的方案**：每次启动抓取 `/chat` 并解析 `menu_item_list`。更动态，但依赖 HTML 结构，且游客 / 登录视角不同。
+
+## D-7 只支持文本，明确拒绝图片 / 文件
+
+**决策**：`image_url` / 音频 / 文件输入返回 400；不实现 tools / function calling。
+
+**原因**：
+- 豆包图片 / 文件需要先上传到其对象存储，再以 `block_type=10052` 引用，链路复杂且易变
+- 豆包网页端没有稳定的原生 tool_call 协议；伪造 tool_call 会污染 OpenAI 语义
+- 明确失败优于静默丢弃
+
+**代价**：Claude Code 等依赖 tool_use 的客户端无法通过本插件完成工具调用。
+
+## D-8 错误三分法
+
+**决策**：`auth` / `risk` / `upstream` 三类错误，分别映射 401 / 429 / 502。
+
+**原因**：
+- 登录失效需要用户重新扫码；风控需要人工验证；上游故障可以重试
+- 三者混淆会导致客户端做错误重试（例如对 401 无限重试）
+
+**代价**：需要维护错误码表；未知错误归入 upstream。
+
+## D-9 没有 refresh token
+
+**决策**：不实现 token 刷新；会话失效直接要求 `pnpm log-in`。
+
+**原因**：豆包网页登录只下发会话 Cookie，没有 refresh token / 续期端点。
+
+**代价**：长期运行时需要定期重新扫码；这是上游限制，不是插件缺陷。
+
+## D-10 离线 mock E2E 覆盖语义，真实账号只做冒烟
+
+**决策**：`pnpm test` 不访问真实豆包；真实账号验证用 `pnpm log-in` + `pnpm smoke -- --yes`。
+
+**原因**：
+- 真实账号测试消耗额度、受风控影响、不可重复
+- mock 可以精确覆盖状态机、错误分支、SSE 边界
+- 语义正确性（登录、thinking、finish_reason、错误映射）可以在离线环境完整验证
+
+**代价**：上游协议变化只能通过真实冒烟发现；因此保留 `check-auth` 与 `smoke` 脚本。

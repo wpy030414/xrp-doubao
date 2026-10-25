@@ -20,6 +20,10 @@
                                                                                       │ www.doubao.com            │
                                                                                       │ /chat/completion          │
                                                                                       │ /samantha/chat/completion │
+                                                                                      │ /alice/resource/prepare_upload │
+                                                                                      │ /top/v1 (ImageX SigV4)    │
+                                                                                      │ /alice/message/pre_handle_v2_without_conv │
+                                                                                      │ /im/conversation/batch_del_user_conv │
                                                                                       │ /passport/...             │
                                                                                       └──────────────────────────┘
 ```
@@ -35,7 +39,7 @@
 | **无状态** | 每个对话请求独立；不维护服务端会话表，客户端带完整 history |
 | **无 App 依赖** | 不读取 / 解密 / 写回豆包电脑版文件；默认直接打开抖音官方授权页，本地只接收 OAuth 回调 |
 | **错误透明** | 登录失效、风控、上游故障分别映射；不静默重试成空响应 |
-| **可回退** | 主端点 `/chat/completion` 不可用时自动回退 `/samantha`，语义不变 |
+| **可回退** | 只在 404 / 非 SSE / 网络等端点或协议错误时回退 `/samantha`；风控、鉴权、参数错误与带附件请求不回退 |
 | **凭据最小暴露** | 日志 / 诊断只输出 Cookie 名称与长度；凭证加密落盘 |
 
 ## 3. 源码结构
@@ -55,7 +59,9 @@ src/
 ├── credentialStore.ts    # DPAPI / AES / 明文
 ├── device.ts             # device_id / web_id / fp 生成
 ├── securityParams.ts     # 上游 query / 请求头
-├── messages.ts           # OpenAI messages → 豆包单条文本
+├── messages.ts           # OpenAI messages → 豆包单条文本 + 当前消息附件
+├── doubaoUpload.ts       # ImageX 图片 / 文件上传（STS + SigV4 + TOS + pre_handle）
+├── conversationCleanup.ts # 每轮结束后删除会话（cmd 4171，异步）
 ├── sse.ts                # 通用 SSE 解析
 ├── doubaoClient.ts       # 上游请求、SSE 解析、错误分类、回退
 ├── openai.ts             # OpenAI chunk / 非流式聚合 / 错误映射
@@ -122,15 +128,55 @@ POST /v1/chat/completions
   → openai.forwardChatCompletions()
       → auth.getSession()                 (缓存 / 存储 / 灾备)
       → DoubaoClient.chat()
-          → messages.flattenMessages()
-          → securityParams.webParams()
+          → messages.flattenMessages()        (文本 + 最后一条用户消息的附件)
+          → doubaoUpload.uploadAttachments()  (有附件时)
+              → POST /alice/resource/prepare_upload
+              → GET  /top/v1?Action=ApplyImageUpload   (SigV4)
+              → POST https://<upload_host>/upload/v1/<StoreUri>
+              → POST /top/v1?Action=CommitImageUpload  (SigV4)
+              → POST /alice/message/pre_handle_v2_without_conv
           → POST /chat/completion (SSE)
               → sse.iterateSse()
-              → parseWebEvent()
-          (失败且 auto) → POST /samantha/chat/completion
+              → parseWebEvent()               (10040 thinking_block / 10000 正文 / CHUNK_DELTA)
+          → SSE 结束后：conversationCleanup.deleteConversation()  (异步，不阻塞响应)
+          (仅 404 / 非 SSE / 网络错误且无附件) → POST /samantha/chat/completion
       → 流式：逐 delta 转 OpenAI chunk
       → 非流式：聚合为 chat.completion
 ```
+
+### 4.3 附件上传
+
+```
+messages.flattenMessages()
+  → 当前用户消息中的 image_url / file / input_file
+  → doubaoUpload.uploadAttachments()
+      → data URL 直接解码；远程 URL 先做 SSRF 检查再下载
+      → 每个附件：prepare_upload → ApplyImageUpload(SigV4) → TOS → CommitImageUpload(SigV4) → pre_handle
+  → buildAttachmentBlock(): block_type=10052，图片 type=1，文件 type=3
+  → /chat/completion 的 messages[0]（附件）+ messages[1]（文本）
+```
+
+- 附件消息共用一个 `local_message_id`，每个附件有自己的 `identifier`
+- 只有最后一条用户消息的附件会上传；历史附件在压平文本里保留 `[图片]` / `[文件：…]` 占位
+- 上传失败按 auth / risk / upstream 分类；附件请求不回退 `/samantha`
+- 默认限制：20 MB / 10 个；远程 URL 默认拒绝内网 / localhost
+
+### 4.4 会话清理
+
+```
+SSE 结束 / 客户端断开
+  → state.conversationId (来自 SSE_ACK)
+  → conversationCleanup.deleteConversation()   (fire-and-forget)
+      → POST /im/conversation/batch_del_user_conv
+        Content-Type: application/json; encoding=utf-8
+        cmd 4171 / conversation_type 3
+      → 712010703 或网络错误重试一次
+  → /health.conversation_cleanup: { enabled, attempted, deleted, failed, lastResult, lastCode, lastAt }
+```
+
+- 删除不阻塞对话响应；失败只记录警告与统计
+- `DOUBAO_AUTO_DELETE_CONVERSATION=0` 可关闭；`DOUBAO_CLEANUP_TIMEOUT_MS` 控制超时
+- 旧 `/samantha` 回退没有 conversation_id，无法清理
 
 ## 5. 凭证存储
 
@@ -169,7 +215,8 @@ DoubaoUpstreamError
 
 - 首个上游分片在响应头发出前取出，因此鉴权 / 风控错误仍能返回正确 HTTP 状态
 - 流中错误以 `data: {"error":{...}}` + `[DONE]` 返回
-- 主端点失败且 `DOUBAO_CHAT_MODE=auto` 时回退 `/samantha`；鉴权错误不回退
+- 主端点仅在 404 / 非 SSE / 网络等端点或协议错误时回退 `/samantha`；鉴权、风控、参数错误与带附件请求不回退
+- 回退成功时响应头带 `X-Doubao-Fallback: 1` 与 URL 编码的 `X-Doubao-Fallback-Reason`
 
 ## 7. V24 插件契约
 

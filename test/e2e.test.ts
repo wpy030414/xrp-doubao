@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { startMockDoubao, type MockDoubao } from './helpers/mockDoubao';
+import { startMockDoubao, TINY_PNG_BASE64, type MockDoubao } from './helpers/mockDoubao';
 
 let mock: MockDoubao;
 let tmpDir: string;
@@ -28,6 +28,11 @@ before(async () => {
   process.env.DOUBAO_PORT = '0';
   process.env.DOUBAO_AUTO_LOGIN = '0';
   process.env.DOUBAO_CHAT_MODE = 'auto';
+  process.env.DOUBAO_UPLOAD = '1';
+  process.env.DOUBAO_MAX_ATTACHMENTS = '10';
+  process.env.DOUBAO_ALLOW_PRIVATE_URLS = '0';
+  process.env.DOUBAO_AUTO_DELETE_CONVERSATION = '1';
+  process.env.DOUBAO_CLEANUP_TIMEOUT_MS = '2000';
   process.env.DOUBAO_DEVICE_ID = DEVICE.deviceId;
   process.env.DOUBAO_WEB_ID = DEVICE.webId;
   process.env.DOUBAO_FP = DEVICE.fp;
@@ -47,6 +52,7 @@ before(async () => {
     messages: await import('../src/messages'),
     sse: await import('../src/sse'),
     config: await import('../src/config'),
+    cleanup: await import('../src/conversationCleanup'),
   };
 });
 
@@ -84,10 +90,28 @@ function makeFlow(opts: any = {}) {
 async function collectChunks(client: any, request: any) {
   const chunks: any[] = [];
   let mode = '';
-  for await (const d of client.chat({ ...request, onMode: (m: string) => { mode = m; } })) {
+  let fallbackReason = '';
+  for await (const d of client.chat({
+    ...request,
+    onMode: (m: string) => {
+      mode = m;
+    },
+    onFallback: (r: string) => {
+      fallbackReason = r;
+    },
+  })) {
     chunks.push(d);
   }
-  return { chunks, mode };
+  return { chunks, mode, fallbackReason };
+}
+
+async function waitFor(fn: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (fn()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('waitFor timeout');
 }
 
 test('CookieJar：域 / 路径 / 过期 / 序列化', () => {
@@ -442,13 +466,86 @@ test('对话 E2E：流式文本 + thinking + usage + 模型映射', async () => 
   assert.match(req.url, /device_id=7000000000000000001/);
   assert.equal(req.body.option.model_config.model_item_key, '3');
   assert.equal(req.body.option.model_config.reasoning_effort, 5);
-  assert.equal(req.body.option.need_deep_think, 1);
+  assert.equal(req.body.option.need_deep_think, 3);
+  assert.equal(req.body.ext.use_deep_think, '3');
+  assert.equal(req.body.option.model_config.model_extra_params.total_window_size, '256000');
   const prompt = req.body.messages[0].content_block[0].content.text_block.text;
   assert.match(prompt, /系统指令/);
   assert.match(prompt, /用户：第一轮/);
   assert.match(prompt, /助手：第一轮回答/);
   assert.match(prompt, /用户：第二轮/);
   assert.match(prompt, /请针对最后一条用户消息作答/);
+
+  // 本轮会话应被自动删除
+  await waitFor(() => mock.state.deleteRequests.length === 1);
+  const del = mock.state.deleteRequests[0];
+  assert.match(del.url, /\/im\/conversation\/batch_del_user_conv\?/);
+  assert.match(del.headers['content-type'], /encoding=utf-8/);
+  assert.equal(del.body.cmd, 4171);
+  const up = del.body.uplink_body.batch_delete_user_conversation_uplink_body;
+  assert.deepEqual(up.conversation_id, ['mock-conv-1']);
+  assert.equal(up.delete_all, false);
+  assert.equal(up.conversation_type, 3);
+});
+
+test('会话清理：下游失败重试一次并计入统计', async () => {
+  mock.reset();
+  mock.state.deleteBehavior = 'fail';
+  const before = mods.cleanup.getCleanupStats();
+  const state = seedSession();
+  const jar = mods.cookie.CookieJar.fromJSON(state.cookies);
+  const result = await mods.cleanup.deleteConversation({
+    baseUrl: mock.url,
+    jar,
+    device: DEVICE,
+    conversationId: 'mock-conv-fail',
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 712010703);
+  assert.equal(mock.state.deleteRequests.length, 2);
+  const after = mods.cleanup.getCleanupStats();
+  assert.equal(after.failed, before.failed + 1);
+  assert.equal(after.attempted, before.attempted + 1);
+
+  const noId = await mods.cleanup.deleteConversation({
+    baseUrl: mock.url,
+    jar,
+    device: DEVICE,
+    conversationId: '',
+  });
+  assert.equal(noId.skipped, 'no-id');
+  mock.state.deleteBehavior = 'ok';
+});
+
+test('thinking 摘要：cot_ui_style=summary 时把步骤标题映射为 reasoning', async () => {
+  mock.reset();
+  mock.state.chatBehavior = 'thinkingSummary';
+  const state = seedSession();
+  const client = new mods.client.DoubaoClient(state);
+  const { chunks } = await collectChunks(client, {
+    model: 'doubao-expert',
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+  assert.equal(chunks.map((c: any) => c.reasoning || '').join(''), '推理步骤一\n推理步骤二\n');
+  assert.equal(chunks.map((c: any) => c.text || '').join(''), '答案完成');
+  await waitFor(() => mock.state.deleteRequests.length === 1);
+  assert.deepEqual(
+    mock.state.deleteRequests[0].body.uplink_body.batch_delete_user_conversation_uplink_body.conversation_id,
+    ['mock-conv-summary'],
+  );
+});
+
+test('thinking 兼容：旧 10040 delimiter 协议仍可解析', async () => {
+  mock.reset();
+  mock.state.chatBehavior = 'legacyDelimiter';
+  const state = seedSession();
+  const client = new mods.client.DoubaoClient(state);
+  const { chunks } = await collectChunks(client, {
+    model: 'doubao-fast',
+    messages: [{ role: 'user', content: '你好' }],
+  });
+  assert.equal(chunks.map((c: any) => c.reasoning || '').join(''), '思考中');
+  assert.equal(chunks.map((c: any) => c.text || '').join(''), '你好，世界');
 });
 
 test('对话回退：/chat/completion 404 → /samantha/chat/completion', async () => {
@@ -456,11 +553,12 @@ test('对话回退：/chat/completion 404 → /samantha/chat/completion', async 
   mock.state.chatBehavior = 'legacyOnly';
   const state = seedSession();
   const client = new mods.client.DoubaoClient(state);
-  const { chunks, mode } = await collectChunks(client, {
+  const { chunks, mode, fallbackReason } = await collectChunks(client, {
     model: 'doubao-fast',
     messages: [{ role: 'user', content: '你好' }],
   });
   assert.equal(mode, 'legacy');
+  assert.ok(fallbackReason);
   const text = chunks.map((c: any) => c.text || '').join('');
   const reasoning = chunks.map((c: any) => c.reasoning || '').join('');
   assert.equal(text, '回退回答');
@@ -470,16 +568,41 @@ test('对话回退：/chat/completion 404 → /samantha/chat/completion', async 
   assert.match(mock.state.legacyRequests[0].url, /aid=582478/);
 });
 
-test('对话回退：主端点返回 JSON 错误（非 SSE）→ 回退', async () => {
+test('不回退：主端点返回风控 JSON（非 SSE）→ 直接报风控', async () => {
   mock.reset();
   mock.state.chatBehavior = 'nonSSE';
   const state = seedSession();
   const client = new mods.client.DoubaoClient(state);
-  const { chunks, mode } = await collectChunks(client, {
+  await assert.rejects(
+    () => collectChunks(client, { model: 'doubao-fast', messages: [{ role: 'user', content: '你好' }] }),
+    (e: any) => e.kind === 'risk' && e.needsCaptcha === true,
+  );
+  assert.equal(mock.state.legacyRequests.length, 0);
+});
+
+test('不回退：主端点 400 参数错误 → 保留 upstream 错误', async () => {
+  mock.reset();
+  mock.state.chatBehavior = 'http400';
+  const state = seedSession();
+  const client = new mods.client.DoubaoClient(state);
+  await assert.rejects(
+    () => collectChunks(client, { model: 'doubao-fast', messages: [{ role: 'user', content: '你好' }] }),
+    (e: any) => e.kind === 'upstream' && e.status === 400,
+  );
+  assert.equal(mock.state.legacyRequests.length, 0);
+});
+
+test('对话回退：主端点返回 HTML（协议错误）→ 回退', async () => {
+  mock.reset();
+  mock.state.chatBehavior = 'html200';
+  const state = seedSession();
+  const client = new mods.client.DoubaoClient(state);
+  const { chunks, mode, fallbackReason } = await collectChunks(client, {
     model: 'doubao-fast',
     messages: [{ role: 'user', content: '你好' }],
   });
   assert.equal(mode, 'legacy');
+  assert.ok(fallbackReason);
   assert.equal(chunks.map((c: any) => c.text || '').join(''), '回退回答');
 });
 
@@ -493,6 +616,7 @@ test('错误分类：风控 / 登录失效', async () => {
     (e: any) => e.kind === 'risk' && e.needsCaptcha === true,
   );
   assert.equal(mods.client.getNeedsCaptcha(), true);
+  assert.equal(mock.state.legacyRequests.length, 0);
   mods.client.resetCaptcha();
   assert.equal(mods.client.getNeedsCaptcha(), false);
 
@@ -502,6 +626,7 @@ test('错误分类：风控 / 登录失效', async () => {
     () => collectChunks(client, { model: 'doubao-fast', messages: [{ role: 'user', content: 'hi' }] }),
     (e: any) => e.kind === 'auth',
   );
+  assert.equal(mock.state.legacyRequests.length, 0);
 });
 
 test('OpenAI HTTP E2E：非流式 / 流式 / 错误映射 / 健康检查', async () => {
@@ -515,6 +640,8 @@ test('OpenAI HTTP E2E：非流式 / 流式 / 错误映射 / 健康检查', async
     assert.equal(health.backend, 'doubao');
     assert.equal(health.auth.loggedIn, true);
     assert.ok(health.models.includes('doubao-fast'));
+    assert.equal(health.conversation_cleanup.enabled, true);
+    assert.ok(health.conversation_cleanup.attempted >= 1);
 
     const nonStream = await fetch(base + '/v1/chat/completions', {
       method: 'POST',
@@ -563,7 +690,23 @@ test('OpenAI HTTP E2E：非流式 / 流式 / 错误映射 / 健康检查', async
     const usageChunk = chunks.find((c) => Array.isArray(c.choices) && c.choices.length === 0);
     assert.equal(usageChunk.usage.total_tokens, 7);
 
-    // 风控 → 429 + needs_captcha
+    // 404 → legacy，响应头标明实际通道与回退
+    mock.reset();
+    mock.state.chatBehavior = 'legacyOnly';
+    const fb = await fetch(base + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'doubao-fast', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    const fbText = await fb.clone().text();
+    assert.equal(fb.status, 200, fbText);
+    assert.equal(fb.headers.get('x-doubao-mode'), 'legacy');
+    assert.equal(fb.headers.get('x-doubao-fallback'), '1');
+    const fbJson: any = await fb.json();
+    assert.equal(fbJson.choices[0].message.content, '回退回答');
+
+    // 风控 → 429 + needs_captcha，且不回退
+    mock.reset();
     mock.state.chatBehavior = 'risk';
     const risk = await fetch(base + '/v1/chat/completions', {
       method: 'POST',
@@ -574,6 +717,7 @@ test('OpenAI HTTP E2E：非流式 / 流式 / 错误映射 / 健康检查', async
     const riskJson: any = await risk.json();
     assert.equal(riskJson.error.type, 'rate_limit_error');
     assert.equal(riskJson.error.needs_captcha, true);
+    assert.equal(mock.state.legacyRequests.length, 0);
     const health2 = await (await fetch(base + '/health')).json();
     assert.equal(health2.needs_captcha, true);
     await fetch(base + '/admin/reset-captcha', { method: 'POST' });
@@ -590,6 +734,8 @@ test('OpenAI HTTP E2E：非流式 / 流式 / 错误映射 / 健康检查', async
     assert.equal(auth.status, 401);
     const authJson: any = await auth.json();
     assert.equal(authJson.error.type, 'authentication_error');
+    assert.equal(mock.state.legacyRequests.length, 0);
+    mock.state.chatBehavior = 'ok';
 
     // 输入校验
     const bad = await fetch(base + '/v1/chat/completions', {
@@ -599,17 +745,116 @@ test('OpenAI HTTP E2E：非流式 / 流式 / 错误映射 / 健康检查', async
     });
     assert.equal(bad.status, 400);
 
+    // 图片：data URL → ImageX 上传 → 10052 附件块 + 文本消息
     const img = await fetch(base + '/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'doubao-fast',
-        messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://x' } }] }],
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: '看图' },
+              { type: 'image_url', image_url: { url: `data:image/png;base64,${TINY_PNG_BASE64}` } },
+            ],
+          },
+        ],
       }),
     });
-    assert.equal(img.status, 400);
+    const imgText = await img.clone().text();
+    assert.equal(img.status, 200, imgText);
     const imgJson: any = await img.json();
-    assert.match(imgJson.error.message, /只支持文本/);
+    assert.equal(imgJson.choices[0].message.content, '你好，世界');
+    assert.equal(imgJson.choices[0].message.reasoning_content, '思考中');
+    const imgChat = mock.state.chatRequests.at(-1)!;
+    assert.equal(imgChat.body.messages.length, 2);
+    assert.equal(imgChat.body.messages[0].content_block[0].block_type, 10052);
+    const imgAtt = imgChat.body.messages[0].content_block[0].content.attachment_block.attachments[0];
+    assert.equal(imgAtt.type, 1);
+    assert.match(imgAtt.image.uri, /^tos-cn-i-mock\/.+\.png$/);
+    assert.equal(imgAtt.image.image_ori.width, 1);
+    assert.equal(imgChat.body.messages[1].content_block[0].content.text_block.text, '看图');
+    assert.equal(mock.state.prepareUploadRequests.at(-1)!.body.resource_type, 2);
+    assert.ok(mock.state.applyRequests.at(-1)!.headers.authorization.startsWith('AWS4-HMAC-SHA256'));
+    assert.ok(mock.state.commitRequests.at(-1)!.headers.authorization.startsWith('AWS4-HMAC-SHA256'));
+    assert.equal(mock.state.tosRequests.at(-1)!.uid, '12345');
+    assert.match(mock.state.tosRequests.at(-1)!.crc, /^[0-9a-f]{8}$/);
+    assert.equal(mock.state.preHandleRequests.at(-1)!.body.uplink_entity.entity_type, 2);
+
+    // 文件：data URL → resource_type=1 → file 附件块
+    const fileRes = await fetch(base + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'doubao-fast',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: '读文件' },
+              {
+                type: 'file',
+                file: {
+                  filename: 'probe.txt',
+                  file_data: `data:text/plain;base64,${Buffer.from('hello file').toString('base64')}`,
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    assert.equal(fileRes.status, 200);
+    const fileChat = mock.state.chatRequests.at(-1)!;
+    const fileAtt = fileChat.body.messages[0].content_block[0].content.attachment_block.attachments[0];
+    assert.equal(fileAtt.type, 3);
+    assert.equal(fileAtt.file.name, 'probe.txt');
+    assert.match(fileAtt.file.uri, /^tos-cn-i-mock\/.+\.txt$/);
+    assert.equal(mock.state.prepareUploadRequests.at(-1)!.body.resource_type, 1);
+    assert.equal(mock.state.preHandleRequests.at(-1)!.body.uplink_entity.entity_type, 1);
+
+    // 音频明确拒绝
+    const audio = await fetch(base + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'doubao-fast',
+        messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: '', format: 'wav' } }] }],
+      }),
+    });
+    assert.equal(audio.status, 400);
+    const audioJson: any = await audio.json();
+    assert.match(audioJson.error.message, /音频/);
+
+    // 远程 URL 默认拒绝内网 / localhost（SSRF）
+    const ssrf = await fetch(base + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'doubao-fast',
+        messages: [
+          { role: 'user', content: [{ type: 'image_url', image_url: { url: 'http://127.0.0.1:1/x.png' } }] },
+        ],
+      }),
+    });
+    assert.equal(ssrf.status, 400);
+    const ssrfJson: any = await ssrf.json();
+    assert.match(ssrfJson.error.message, /内网|本机/);
+
+    // 附件数量限制
+    const many = Array.from({ length: 11 }, () => ({
+      type: 'image_url',
+      image_url: { url: `data:image/png;base64,${TINY_PNG_BASE64}` },
+    }));
+    const manyRes = await fetch(base + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'doubao-fast', messages: [{ role: 'user', content: many }] }),
+    });
+    assert.equal(manyRes.status, 400);
+    const manyJson: any = await manyRes.json();
+    assert.match(manyJson.error.message, /最多上传 10 个附件/);
   } finally {
     await started.close();
   }
@@ -629,7 +874,7 @@ test('插件注册载荷：V24 无 keys，display_name 唯一', () => {
   assert.match(payload.provider.base_url, /^http:\/\/localhost:/);
 });
 
-test('消息压平：单轮 / system / 多轮 / 图片拒绝', () => {
+test('消息压平：单轮 / system / 多轮 / 附件提取', () => {
   const { flattenMessages, UnsupportedMessageError } = mods.messages;
   assert.equal(flattenMessages([{ role: 'user', content: 'hi' }]).prompt, 'hi');
   assert.equal(
@@ -644,8 +889,44 @@ test('消息压平：单轮 / system / 多轮 / 图片拒绝', () => {
   assert.match(multi, /用户：u1/);
   assert.match(multi, /助手：a1/);
   assert.match(multi, /用户：u2/);
+
+  const img = flattenMessages([
+    { role: 'user', content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${TINY_PNG_BASE64}` } }] },
+  ]);
+  assert.equal(img.prompt, '');
+  assert.equal(img.attachments.length, 1);
+  assert.equal(img.attachments[0].kind, 'image');
+  assert.equal(img.attachments[0].source.type, 'data');
+
+  const withText = flattenMessages([
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: '看图' },
+        { type: 'image_url', image_url: { url: `data:image/png;base64,${TINY_PNG_BASE64}` } },
+      ],
+    },
+  ]);
+  assert.equal(withText.prompt, '看图');
+  assert.equal(withText.attachments.length, 1);
+
+  const file = flattenMessages([
+    { role: 'user', content: [{ type: 'file', file: { filename: 'a.txt', file_data: 'data:text/plain;base64,aGk=' } }] },
+  ]);
+  assert.equal(file.attachments.length, 1);
+  assert.equal(file.attachments[0].kind, 'file');
+  assert.equal(file.attachments[0].name, 'a.txt');
+
+  const historyImage = flattenMessages([
+    { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.com/a.png' } }] },
+    { role: 'assistant', content: 'ok' },
+    { role: 'user', content: '继续' },
+  ]);
+  assert.equal(historyImage.attachments.length, 0);
+  assert.match(historyImage.prompt, /\[图片\]/);
+
   assert.throws(
-    () => flattenMessages([{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'x' } }] }]),
+    () => flattenMessages([{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: '', format: 'wav' } }] }]),
     UnsupportedMessageError,
   );
   assert.throws(() => flattenMessages([]), UnsupportedMessageError);

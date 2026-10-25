@@ -288,6 +288,9 @@ Cookie: sessionid=...; ttwid=...; ...
 - `agent_mode=2` 对应聊天，`agent_mode=1` 对应办公 / 工作任务
 - `mode_id=1` 对应对话，`mode_id=3` 对应工作任务
 - `reasoning_effort` 取 3/4/5（低 / 中 / 高）
+- `option.need_deep_think` 与 `ext.use_deep_think` 取所选菜单的 `menu_type`（快速 0、专家 3、工作任务 Auto 9、Pro 5、2.1 Lite 10001），**不是 0/1 布尔值**
+- 登录态专家实测：`need_deep_think:3`、`ext.use_deep_think:"3"`、`model_item_key:"3"`、`model_config.model_extra_params.total_window_size:"256000"`
+- 每轮请求都会创建会话：`need_create_conversation:true` + 新的 `local_conversation_id`；置空并设 false 会返回 `710020202 common invalid param`
 - 任务类模型可能需要登录 / 订阅；插件按客户端传入的模型别名映射
 
 ## 5. SSE 协议
@@ -299,34 +302,43 @@ Cookie: sessionid=...; ttwid=...; ...
 ```
 : heartbeat
 
-data: {"content_block":[...]}
-
-data: {"patch_op":[{"patch_value":{"content_block":[...]}}]}
+event: SSE_HEARTBEAT
+data: {}
 
 event: SSE_ACK
 data: {"ack_client_meta":{"conversation_id":"..."}}
 
-event: SSE_HEARTBEAT
-data: {}
+event: FULL_MSG_NOTIFY
+data: {"message":{...}}                       # 用户消息回显
+
+event: STREAM_MSG_NOTIFY
+data: {"content":{"content_block":[...]}}     # 首个增量
+
+event: STREAM_CHUNK
+data: {"message_id":"...","patch_op":[{"patch_value":{"content_block":[...]}}]}
+
+event: CHUNK_DELTA
+data: {"text":"..."}                           # 实测为正文增量；解析器兼容 {"think":"..."}
+
+event: SSE_REPLY_END
+data: {"end_type":1}                           # 正文结束；2/3 是推荐问题/流结束
 
 event: STREAM_ERROR
 data: {"error_code":710022004,"error_msg":"rate limited","extra":{"decision":"{\"type\":\"verify\"}"}}
-
-data: [DONE]
 ```
 
 内容块：
 
 | `block_type` | 含义 | 插件处理 |
 |---:|---|---|
-| 10000 | 文本块（思考 / 正文） | 按状态机写入 `reasoning_content` 或 `content` |
-| 10040 | 思考分隔符 | 第一次切到 thinking，第二次切回正文 |
+| 10000 | 正文文本块 | `content.text_block.text` → `content` |
+| 10040 | 思考块 `BLOCK_THINKING` | 完整思考在 `content.thinking_block.think`；`cot_ui_style=summary` 时只有 `finish_title/streaming_title` 步骤标题，插件映射为 reasoning；旧版空块仍按分隔符兼容 |
 | 10001 / 2001 / 2003 | 文本兼容块 | 作为正文 |
-| 2008 | 思考文本 | `content.think` → reasoning |
+| 2008 | 旧版思考文本 | `content.think` → reasoning |
 | 10024 | 通用工具块 | 忽略（当前不映射 tool_calls） |
 | 10025 | 搜索结果块 | 忽略 |
 | 10101 | loading 块 | 忽略 |
-| 10052 | 附件块 | 忽略 |
+| 10052 | 附件块 | 入参侧构造；出参侧当前忽略 |
 
 插件同时兼容 `content_block`、`patch_op.patch_value.content_block`、`patch_op.patch_value.content`（JSON 字符串）三种承载方式。
 
@@ -374,7 +386,74 @@ data: {"event_type":2003,"event_data":{}}
 ```
 
 `event_type`：2001 CMPL / 2002 ACK / 2003 FIN / 2005 ERR / 2010 VERBOSE。
-`content_type`：2001 文本 / 2002 推荐问题 / 2008 思考 / 10000 文本 / 10040 思考分隔。
+`content_type`：2001 文本 / 2002 推荐问题 / 2008 思考 / 10000 文本 / 10040 思考（按思考文本处理）。
+
+### 5.3 附件上传（ImageX）
+
+图片与文件走同一条 ImageX 链路（2026-10-25 登录态实测）：
+
+```
+1) POST /alice/resource/prepare_upload
+   { "tenant_id":"5", "scene_id":"5", "resource_type": 2 }   # 图片 2 / 文件 1
+   → { service_id, upload_host, upload_auth_token:{ access_key, secret_key, session_token } }
+
+2) GET /top/v1?Action=ApplyImageUpload&Version=2018-08-01&ServiceId=<id>
+       &NeedFallback=true&FileSize=<n>&FileExtension=.png&s=<random>
+   SigV4；签名头：x-amz-date;x-amz-security-token
+   → UploadAddress.StoreInfos[{ StoreUri, Auth, UploadID }] + UploadHosts[0]
+
+3) POST https://<upload_host>/upload/v1/<StoreUri>
+   Authorization: <Auth>；Content-CRC32: <crc32>；X-Storage-U: <uid>
+   → { code: 2000 }
+
+4) POST /top/v1?Action=CommitImageUpload&Version=2018-08-01&ServiceId=<id>
+   { "SessionKey": "<base64 JSON>" }
+   → Result.PluginResult[0]（ImageWidth / ImageHeight / ImageFormat / ImageSize / ImageMd5）
+
+5) POST /alice/message/pre_handle_v2_without_conv
+   { uplink_entity, bot_id, local_message_id }
+   → { code:0, data:{ pre_generate_id } }
+```
+
+说明：
+
+- `SessionKey` 图片为 `{accountType:"ImageX", fileType:"image", storeInfos:"<JSON string>", uploadHost, uri, ...}`；文件为 `{accountType:"ImageX", fileType:"object", uri, ...}`。
+- SigV4 的 credential scope 是 `<date>/cn-north-1/imagex/aws4_request`；GET 的 payload hash 是空串 SHA-256，POST 是请求体 SHA-256。
+- `pre_handle` 的 `entity_type`：图片 2、文件 1；文件的 `entity_content.file` 含 `file_name / key / md5 / file_type:1 / image.key / size`。
+- 消息里的附件块是 `block_type:10052` 的 `content.attachment_block.attachments[]`：
+  - 图片：`type:1` + `image:{name,uri,image_ori:{width,height,format}}`
+  - 文件：`type:3` + `file:{uri,url,file_type:0,name,size}`
+- 纯 HTTP（不生成 `a_bogus`）实测可完成 `prepare_upload → Apply → TOS → Commit → pre_handle`；STS 是短时凭证，只用于当前上传。
+- 网页端在发送前调用 `pre_handle` 触发服务端解析；插件同样调用。实测 `/chat/completion` 消息体中未出现返回的 `pre_generate_id`。
+
+
+
+### 5.4 会话删除（batch_del_user_conv）
+
+`/chat/completion` 的 `SSE_ACK` 会返回 `ack_client_meta.conversation_id`。每轮结束后插件调用：
+
+```
+POST /im/conversation/batch_del_user_conv?<web params>
+Content-Type: application/json; encoding=utf-8
+{
+  "cmd": 4171,
+  "uplink_body": {
+    "batch_delete_user_conversation_uplink_body": {
+      "conversation_id": ["<id>"],
+      "delete_all": false,
+      "conversation_type": 3
+    }
+  },
+  "sequence_id": "<uuid>",
+  "channel": 2,
+  "version": "1"
+}
+```
+
+- 成功：`{ "cmd":4171, "status_code":0, "status_desc":"OK" }`
+- `Content-Type` 少了 `encoding=utf-8` → `712012002 不支持编码类型`
+- 空会话可能返回 `712010703 调用下游服务器失败`；插件对 712010703 与网络错误重试一次
+- 旧 `/samantha` 回退没有 conversation_id，无法清理
 
 ## 6. 错误与风控
 
@@ -394,7 +473,7 @@ data: {"event_type":2003,"event_data":{}}
 1. **浏览器网络抓包**：用 Playwright 打开 `www.doubao.com/chat/`，点击登录，观测登录弹窗的 OAuth 跳转、`get_qrcode` / `check_qrconnect` 请求与响应。
 2. **纯 HTTP 复现**：直接请求 CSRF、二维码、轮询端点，确认无需浏览器 JS / `a_bogus`。
 3. **社区实现交叉验证**：`/samantha` 请求结构、`aid=582478` 参数组合与公开逆向项目一致；本仓库只采用协议事实，不复制其代码。
-4. **离线 E2E**：`pnpm test` 用 mock 豆包覆盖登录状态机、Cookie、模型映射、流式 / 非流式、回退、错误映射；2026-10-25 为 20 条全绿。
+4. **离线 E2E**：`pnpm test` 用 mock 豆包覆盖登录状态机、Cookie、模型映射、流式 / 非流式、思考块与摘要、附件上传、会话清理、回退、错误映射；2026-10-25 为 25 条全绿。
 5. **真实账号冒烟**：`pnpm smoke -- --yes`（消耗一次额度）。
 
 ### 7.1 真实账号验证结果（2026-10-25）
@@ -402,18 +481,29 @@ data: {"event_type":2003,"event_data":{}}
 - `pnpm log-in`：Playwright 打开豆包登录弹窗 → 抖音官方授权页 → 用户扫码 → 豆包官方 callback 换票；插件提取 32 条 Cookie，DPAPI 落盘，uid / 昵称可读。
 - `pnpm check-auth`：`loggedIn=true`；`/passport/account/info/v2/` 未带 `a_bogus` 也返回 uid / 昵称。
 - `pnpm smoke -- --yes --model doubao-fast`：返回「收到」，`X-Doubao-Mode: web`。
-- `pnpm smoke -- --yes --model doubao-expert --prompt ...`：`reasoning_content` 有思考链，正文正常。
+- 登录态抓包（2026-10-25）：网页端真实请求为 `POST /chat/completion`；专家请求为 `need_deep_think:3`、`ext.use_deep_think:"3"`、`model_item_key:"3"`。
+- 思考块：`block_type:10040` + `content.thinking_block`；网页端 `cot_ui_style=summary` 时只下发 `finish_title/streaming_title` 步骤标题（实测“解答量水问题 / 整理量水操作步骤”），不下发完整 CoT；插件把标题映射为 `reasoning_content`，完整 `think` 存在时优先。此前“10040 是分隔符”的解释有误。
+- 正文增量：实测 `CHUNK_DELTA` 事件 `{"text":"..."}` 共 17 条；插件按正文增量处理。
+- 附件：ImageX 链路（`prepare_upload → Apply → TOS → Commit → pre_handle`）已用纯 HTTP 验证通过（图片与 `.txt`），不依赖 `a_bogus`。
+- 会话删除：真实 web 会话的 `batch_del_user_conv` 返回 `status_code:0`；fast / expert 各验证一次，`deleted=1`。
+- 风控：同一账号的网页端与插件都可能收到 `710022004`，且与提示长度/语义有关；需要在浏览器完成人机验证。
+- 旧 `/samantha` 回退：实测会把 CoT 混在正文里返回，且没有 conversation_id；不作为默认路径。
 - 插件直连 HTTP：`/health` 正常；`/v1/chat/completions` 流式 / 非流式均返回正确 OpenAI 结构。
 - `plugin-doubao` 已通过 WebSocket 注册并在 xrl-router 中 confirm 为 enabled。
 - 失败记录：`redirect_uri=localhost` → 抖音提示“非法重定向链接”；Node 端重放官方 code → 豆包返回 `code=22 非法应用`。因此插件使用 Playwright 让官方页面完成换票。
 
 ## 8. 已知限制
 
-- 不生成 `a_bogus`；主端点若被风控，回退 `/samantha`。两条链路都失败时只能等待验证 / 重新登录
+- 不生成 `a_bogus`；主端点只在 404 / 非 SSE / 网络等协议或端点错误时回退 `/samantha`，风控与鉴权错误不回退
 - `/passport/account/info/v2/` 可能要求 `a_bogus`；账号信息失败不影响对话
 - 豆包网页登录没有 refresh token；会话 Cookie 过期只能重新扫码
 - 上游协议、模型键、`pc_version` 可能随豆包升级变化；参数均可通过环境变量覆盖
-- 只支持文本；图片 / 文件 / 音频输入未实现
+- 图片 / 文件通过 ImageX 上传；附件只上传当前用户消息，历史附件以占位符保留
+- 音频输入未实现
+- 附件默认限制 20 MB / 10 个（`DOUBAO_MAX_ATTACHMENT_MB` / `DOUBAO_MAX_ATTACHMENTS` 可调）
+- 每轮创建会话后自动删除（`DOUBAO_AUTO_DELETE_CONVERSATION=1` 默认）；删除失败只记统计；旧 `/samantha` 没有 conversation_id，无法清理
+- 思考链通常为步骤摘要（`cot_ui_style=summary`）；完整 CoT 不由网页端下发，可用 `DOUBAO_THINKING_SUMMARY=0` 关闭摘要映射
+- 真实网页请求即使带 `a_bogus` 也可能触发风控验证；插件不破解验证码
 - 不实现 OpenAI tools / function calling；不伪造 tool_call 语义
 - 不读取、不解密、不写回豆包电脑版的任何文件
 

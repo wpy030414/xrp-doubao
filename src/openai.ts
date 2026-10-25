@@ -25,6 +25,11 @@ function errorType(status: number): string {
   return 'upstream_error';
 }
 
+/** HTTP 头只能放 latin1；回退原因统一 URL 编码后截断 */
+function headerSafe(value: string): string {
+  return encodeURIComponent(value).slice(0, 300);
+}
+
 function jsonError(c: Context, status: number, message: string, extra: Record<string, unknown> = {}): Response {
   return c.json({ error: { message, type: errorType(status), ...extra } }, status as any);
 }
@@ -71,6 +76,7 @@ interface StartedChat {
   iterator: AsyncGenerator<ChatDelta>;
   first: IteratorResult<ChatDelta>;
   mode?: ChatMode;
+  fallbackReason?: string;
   session: DoubaoAuthState;
 }
 
@@ -80,6 +86,7 @@ async function startChat(
   signal: AbortSignal,
 ): Promise<StartedChat> {
   let mode: ChatMode | undefined;
+  let fallbackReason: string | undefined;
   const client = new DoubaoClient(session);
   const iterator = client.chat({
     model: typeof body.model === 'string' ? body.model : DEFAULT_MODEL,
@@ -90,9 +97,12 @@ async function startChat(
     onMode: (m) => {
       mode = m;
     },
+    onFallback: (reason) => {
+      fallbackReason = reason;
+    },
   });
   const first = await iterator.next();
-  return { iterator, first, mode, session };
+  return { iterator, first, mode, fallbackReason, session };
 }
 
 /**
@@ -167,6 +177,11 @@ export async function forwardChatCompletions(body: any, c: Context): Promise<Res
       const message: any = { role: 'assistant', content: content.join('') };
       const r = reasoning.join('');
       if (r) message.reasoning_content = r;
+      c.header('X-Doubao-Mode', started.mode || 'auto');
+      if (started.fallbackReason) {
+        c.header('X-Doubao-Fallback', '1');
+        c.header('X-Doubao-Fallback-Reason', headerSafe(started.fallbackReason));
+      }
       return c.json({
         id: `chatcmpl-${uuid()}`,
         object: 'chat.completion',
@@ -278,6 +293,12 @@ export async function forwardChatCompletions(body: any, c: Context): Promise<Res
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
       'X-Doubao-Mode': started.mode || 'auto',
+      ...(started.fallbackReason
+        ? {
+            'X-Doubao-Fallback': '1',
+            'X-Doubao-Fallback-Reason': headerSafe(started.fallbackReason),
+          }
+        : {}),
     },
   });
 }

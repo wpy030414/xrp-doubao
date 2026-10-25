@@ -7,11 +7,22 @@
 
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
+import crypto from 'node:crypto';
 
 export const TINY_PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nGQAAAAASUVORK5CYII=';
 
-export type ChatBehavior = 'ok' | 'risk' | 'auth' | 'legacyOnly' | 'nonSSE' | 'http401';
+export type ChatBehavior =
+  | 'ok'
+  | 'risk'
+  | 'auth'
+  | 'legacyOnly'
+  | 'nonSSE'
+  | 'http401'
+  | 'http400'
+  | 'html200'
+  | 'legacyDelimiter'
+  | 'thinkingSummary';
 export type QrMode = 'normal' | 'expired' | 'refused' | 'alwaysNew';
 
 export interface MockState {
@@ -22,6 +33,14 @@ export interface MockState {
   chatRequests: Array<{ url: string; cookie: string; body: any }>;
   legacyRequests: Array<{ url: string; cookie: string; body: any }>;
   loginRequests: string[];
+  uploadHost: string;
+  prepareUploadRequests: Array<{ url: string; body: any }>;
+  applyRequests: Array<{ url: string; headers: Record<string, string> }>;
+  commitRequests: Array<{ url: string; body: any; headers: Record<string, string> }>;
+  tosRequests: Array<{ url: string; size: number; crc: string; uid: string }>;
+  preHandleRequests: Array<{ url: string; body: any }>;
+  deleteBehavior: 'ok' | 'fail';
+  deleteRequests: Array<{ url: string; body: any; headers: Record<string, string> }>;
 }
 
 export interface MockDoubao {
@@ -64,6 +83,14 @@ export async function startMockDoubao(): Promise<MockDoubao> {
     chatRequests: [],
     legacyRequests: [],
     loginRequests: [],
+    uploadHost: '',
+    prepareUploadRequests: [],
+    applyRequests: [],
+    commitRequests: [],
+    tosRequests: [],
+    preHandleRequests: [],
+    deleteBehavior: 'ok',
+    deleteRequests: [],
   };
   const reset = () => {
     state.qrPolls = 0;
@@ -73,6 +100,13 @@ export async function startMockDoubao(): Promise<MockDoubao> {
     state.chatRequests = [];
     state.legacyRequests = [];
     state.loginRequests = [];
+    state.prepareUploadRequests = [];
+    state.applyRequests = [];
+    state.commitRequests = [];
+    state.tosRequests = [];
+    state.preHandleRequests = [];
+    state.deleteBehavior = 'ok';
+    state.deleteRequests = [];
   };
 
   const app = new Hono();
@@ -205,6 +239,136 @@ export async function startMockDoubao(): Promise<MockDoubao> {
     return json({ data: { error_code: 1, description: '会话过期' }, message: 'error' });
   });
 
+  // ── 附件上传（ImageX 替身）──────────────────────────────
+  app.post('/alice/resource/prepare_upload', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    state.prepareUploadRequests.push({ url: c.req.url, body });
+    return json({
+      code: 0,
+      msg: '',
+      data: {
+        service_id: 'mock-imagex',
+        upload_path_prefix: 'rc/pc/bot-chat',
+        upload_host: state.uploadHost,
+        upload_auth_token: {
+          access_key: 'AKTPMOCK',
+          secret_key: 'mock-secret',
+          session_token: 'STS2mock',
+        },
+      },
+    });
+  });
+
+  app.get('/top/v1', (c) => {
+    const action = c.req.query('Action');
+    if (action !== 'ApplyImageUpload') {
+      return json({ ResponseMetadata: { Error: { Code: 'InvalidAction', Message: action || '' } } }, 400);
+    }
+    const ext = c.req.query('FileExtension') || '.bin';
+    const hash = crypto.randomBytes(16).toString('hex');
+    const storeUri = `tos-cn-i-mock/${hash}${ext}`;
+    state.applyRequests.push({
+      url: c.req.url,
+      headers: {
+        authorization: c.req.header('authorization') || '',
+        'x-amz-date': c.req.header('x-amz-date') || '',
+        'x-amz-security-token': c.req.header('x-amz-security-token') || '',
+        'x-amz-content-sha256': c.req.header('x-amz-content-sha256') || '',
+      },
+    });
+    return json({
+      ResponseMetadata: {
+        RequestId: 'mock-apply',
+        Action: 'ApplyImageUpload',
+        Version: '2018-08-01',
+        Service: 'imagex',
+        Region: 'cn-north-1',
+      },
+      Result: {
+        UploadAddress: {
+          StoreInfos: [{ StoreUri: storeUri, Auth: 'SpaceKey/mock', UploadID: 'mock-upload-id' }],
+          UploadHosts: [state.uploadHost],
+          UploadHeader: null,
+          SessionKey: 'mock-session-key',
+        },
+      },
+    });
+  });
+
+  app.post('/top/v1', async (c) => {
+    const action = c.req.query('Action');
+    const body = await c.req.json().catch(() => null);
+    if (action !== 'CommitImageUpload') {
+      return json({ ResponseMetadata: { Error: { Code: 'InvalidAction', Message: action || '' } } }, 400);
+    }
+    state.commitRequests.push({
+      url: c.req.url,
+      body,
+      headers: {
+        authorization: c.req.header('authorization') || '',
+        'x-amz-date': c.req.header('x-amz-date') || '',
+        'x-amz-security-token': c.req.header('x-amz-security-token') || '',
+        'x-amz-content-sha256': c.req.header('x-amz-content-sha256') || '',
+      },
+    });
+    return json({
+      ResponseMetadata: {
+        RequestId: 'mock-commit',
+        Action: 'CommitImageUpload',
+        Version: '2018-08-01',
+        Service: 'imagex',
+        Region: 'cn-north-1',
+      },
+      Result: {
+        Results: [{ Uri: 'mock', UriStatus: 2000 }],
+        PluginResult: [
+          {
+            FileName: 'mock',
+            SourceUri: 'mock',
+            ImageUri: 'mock',
+            ImageWidth: 1,
+            ImageHeight: 1,
+            ImageFormat: 'png',
+            ImageMd5: 'mock-md5',
+            ImageSize: 123,
+            FrameCnt: 1,
+            ContentType: 'image/png',
+          },
+        ],
+      },
+    });
+  });
+
+  app.post('/upload/v1/*', async (c) => {
+    const buf = Buffer.from(await c.req.arrayBuffer());
+    state.tosRequests.push({
+      url: c.req.url,
+      size: buf.length,
+      crc: c.req.header('content-crc32') || '',
+      uid: c.req.header('x-storage-u') || '',
+    });
+    return json({ code: 2000, apiversion: 'v1', message: 'Success', data: { crc32: '00000000' } });
+  });
+
+  app.post('/alice/message/pre_handle_v2_without_conv', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    state.preHandleRequests.push({ url: c.req.url, body });
+    return json({ code: 0, msg: '', data: { pre_generate_id: 'mock-pre-generate' } });
+  });
+
+  app.post('/im/conversation/batch_del_user_conv', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    state.deleteRequests.push({
+      url: c.req.url,
+      body,
+      headers: { 'content-type': c.req.header('content-type') || '' },
+    });
+    if (state.deleteBehavior === 'fail') {
+      return json({ cmd: 4171, status_code: 712010703, status_desc: '调用下游服务器失败' });
+    }
+    return json({ cmd: 4171, status_code: 0, status_desc: 'OK', downlink_body: {}, version: '1' });
+  });
+
   app.post('/chat/completion', async (c) => {
     let body: any = null;
     try {
@@ -219,6 +383,15 @@ export async function startMockDoubao(): Promise<MockDoubao> {
     }
     if (behavior === 'http401') {
       return json({ code: 710012001, msg: '登录已过期' }, 401);
+    }
+    if (behavior === 'http400') {
+      return json({ code: 400, msg: 'bad param' }, 400);
+    }
+    if (behavior === 'html200') {
+      return new Response('<html><body>endpoint changed</body></html>', {
+        status: 200,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
     }
     if (behavior === 'nonSSE') {
       return json({ code: 710022004, msg: 'rate limited', extra: { decision: '{"type":"verify"}' } });
@@ -235,14 +408,47 @@ export async function startMockDoubao(): Promise<MockDoubao> {
         'data: {"error_code":710022004,"error_msg":"rate limited","extra":{"decision":"{\\"type\\":\\"verify\\"}"}}\n\n',
       ]);
     }
+    if (behavior === 'legacyDelimiter') {
+      return sseResponse([
+        ': heartbeat\n\n',
+        'data: {"content_block":[{"block_type":10040,"content":{}}]}\n\n',
+        'data: {"content_block":[{"block_type":10000,"content":{"text_block":{"text":"思考中"}}}]}\n\n',
+        'data: {"content_block":[{"block_type":10040,"content":{}}]}\n\n',
+        'data: {"content_block":[{"block_type":10000,"content":{"text_block":{"text":"你好"}}}]}\n\n',
+        'data: {"content_block":[{"block_type":10000,"content":{"text_block":{"text":"，世界"}}}]}\n\n',
+        'data: {"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}\n\n',
+        'event: SSE_REPLY_END\n',
+        'data: {"end_type":1}\n\n',
+      ]);
+    }
+    if (behavior === 'thinkingSummary') {
+      return sseResponse([
+        ': heartbeat\n\n',
+        'event: SSE_ACK\n',
+        'data: {"ack_client_meta":{"conversation_id":"mock-conv-summary"}}\n\n',
+        'data: {"content_block":[{"block_type":10040,"content":{"thinking_block":{"finish_title":"推理步骤一","streaming_title":"推理步骤一"}}}]}\n\n',
+        'data: {"content_block":[{"block_type":10000,"content":{"text_block":{"text":"答案"}}}]}\n\n',
+        'data: {"content_block":[{"block_type":10040,"content":{"thinking_block":{"finish_title":"推理步骤二","streaming_title":"推理步骤二"}}}]}\n\n',
+        'data: {"content_block":[{"block_type":10000,"content":{"text_block":{"text":"完成"}}}]}\n\n',
+        'event: SSE_REPLY_END\n',
+        'data: {"end_type":1}\n\n',
+      ]);
+    }
     return sseResponse([
       ': heartbeat\n\n',
-      'data: {"content_block":[{"block_type":10040,"content":{}}]}\n\n',
-      'data: {"content_block":[{"block_type":10000,"content":{"text_block":{"text":"思考中"}}}]}\n\n',
-      'data: {"content_block":[{"block_type":10040,"content":{}}]}\n\n',
-      'data: {"content_block":[{"block_type":10000,"content":{"text_block":{"text":"你好"}}}]}\n\n',
-      'data: {"content_block":[{"block_type":10000,"content":{"text_block":{"text":"，世界"}}}]}\n\n',
+      'event: SSE_ACK\n',
+      'data: {"ack_client_meta":{"conversation_id":"mock-conv-1"}}\n\n',
+      'event: FULL_MSG_NOTIFY\n',
+      'data: {"message":{"content_type":9999,"content":"[{\\"block_type\\":10000,\\"content\\":{\\"text_block\\":{\\"text\\":\\"用户原话\\"}}}]","content_block":[{"block_type":10000,"content":{"text_block":{"text":"用户原话"}}}]}}\n\n',
+      'event: STREAM_MSG_NOTIFY\n',
+      'data: {"content":{"content_block":[{"block_type":10040,"content":{"thinking_block":{"think":"思考中","scene":1}}}]}}\n\n',
+      'event: STREAM_MSG_NOTIFY\n',
+      'data: {"content":{"content_block":[{"block_type":10000,"content":{"text_block":{"text":"你好"}}}]}}\n\n',
+      'event: CHUNK_DELTA\n',
+      'data: {"text":"，世界"}\n\n',
       'data: {"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}\n\n',
+      'event: SSE_REPLY_END\n',
+      'data: {"end_type":1}\n\n',
       'data: [DONE]\n\n',
     ]);
   });
@@ -289,6 +495,7 @@ export async function startMockDoubao(): Promise<MockDoubao> {
     });
   });
   const port = server.address().port;
+  state.uploadHost = `127.0.0.1:${port}`;
   const url = `http://127.0.0.1:${port}`;
   return {
     url,

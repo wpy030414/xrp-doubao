@@ -30,7 +30,7 @@
 - 不实现 Anthropic Messages API（由 xrl-router 负责）
 - 不做账号池、多账号轮换、密钥轮转
 - 不做本地推理
-- 不实现图片 / 音频 / 文件输入
+- 音频输入暂不支持（图片 / 文件已支持）
 - 不实现 OpenAI tools / function calling
 - 不绕过风控验证码
 - 不读取、解密、写回豆包电脑版凭证
@@ -66,15 +66,18 @@
 
 - 接受 OpenAI messages（system / user / assistant / tool）
 - 无状态压平为一条豆包用户消息；客户端带完整 history 即可多轮
-- 模型别名映射到 `model_item_key` / `agent_mode` / `mode_id` / 思考强度
+- 最后一条用户消息中的图片 / 文件通过 ImageX 上传，作为 `block_type:10052` 附件块发送；音频暂不支持
+- 模型别名映射到 `model_item_key` / `agent_mode` / `mode_id` / `need_deep_think` / 思考强度
 - 上游流式；客户端非流式时本地聚合
-- thinking → `reasoning_content`；正文 → `content`
+- thinking → `reasoning_content`；正文 → `content`；`cot_ui_style=summary` 时把步骤标题映射为 reasoning
+- 每轮结束后异步删除本轮豆包会话（`DOUBAO_AUTO_DELETE_CONVERSATION=1` 默认）
 - 非结束分片 `finish_reason=null`；结束分片 `stop`
 - 不输出空 `tool_calls: []`
 
 ### FR-4 回退与错误
 
-- 主端点 `/chat/completion` 404 / 非 SSE / 风控时，`auto` 回退 `/samantha/chat/completion`
+- 主端点仅在 404 / 非 SSE / 网络等端点或协议错误时回退 `/samantha/chat/completion`
+- 风控（710022xxx）、鉴权（401 / 710012xxx）、参数（400 / 422）错误不回退；带附件请求不回退
 - 401 / 710012001 → 401 `authentication_error`
 - 710022004 → 429 + `needs_captcha`
 - 其他 → 502 或上游状态
@@ -113,7 +116,10 @@
 | `reasoning_content` | 只承载思考链；正文不混入 |
 | `finish_reason` | 只在最终 chunk 出现 `stop`；中间为 `null` |
 | 非流式 | 与流式内容一致，聚合后一次性返回 |
-| 回退 | 主端点失败时语义不变；响应头标明实际通道 |
+| 回退 | 只在端点 / 协议错误时回退；风控、鉴权、参数错误与附件请求不回退；响应头标明实际通道与回退原因 |
+| 附件 | 图片 / 文件上传后以 10052 附件块发送；历史附件占位；音频 400 |
+| 会话清理 | 每轮结束后删除本轮会话；失败只记统计；旧 `/samantha` 无 id 不清理 |
+| 思考摘要 | 完整 `think` 优先；`cot_ui_style=summary` 时步骤标题进入 `reasoning_content` |
 | 错误 | 登录失效 ≠ 风控 ≠ 上游故障；分别映射 401 / 429 / 502 |
 
 ### 6.3 E2E 覆盖矩阵
@@ -129,11 +135,14 @@
 | 登录超时 | 同上 |
 | 认证状态 / 账号查询 / 强制重登 | 同上 |
 | 流式正文 + thinking + usage + 模型映射 | 同上 |
-| 主端点 404 / 非 SSE → 回退 | 同上 |
+| thinking_block / 旧 delimiter 兼容 | 同上 |
+| 图片 / 文件上传（data URL / 远程 URL / 大小与数量限制） | 同上 |
+| 会话自动清理 / 删除失败重试 / 统计 | 同上 |
+| 主端点 404 / HTML → 回退；风控 / 400 → 不回退 | 同上 |
 | 风控 / 登录失效分类 | 同上 |
 | OpenAI HTTP 流式 / 非流式 / 错误 / 校验 | 同上 |
 | V24 注册载荷无 keys | 同上 |
-| 消息压平 / 图片拒绝 | 同上 |
+| 消息压平 / 图片与文件提取 | 同上 |
 | SSE 解析 | 同上 |
 
 ## 7. 成功标准

@@ -15,6 +15,11 @@ function envBool(key: string, fallback: boolean): boolean {
   return /^(1|true|yes|on)$/i.test(v.trim());
 }
 
+function envInt(key: string, fallback: number): number {
+  const v = parseInt(env(key, String(fallback)), 10);
+  return Number.isFinite(v) ? v : fallback;
+}
+
 /** 自包含凭证文件默认落在用户数据目录，不进仓库 */
 function detectCredentialPath(): string {
   const base =
@@ -33,11 +38,15 @@ export interface DoubaoModelPreset {
   id: string;
   name: string;
   itemId: number;
+  /** 网页菜单的 menu_type，同时也是 need_deep_think / ext.use_deep_think 的值 */
+  menuType: number;
   modelItemKey: string;
   modeId: string;
   agentMode: number;
   reasoningEffort: 3 | 4 | 5;
   deepThink: boolean;
+  /** 网页端 model_config.model_extra_params */
+  modelExtraParams?: Record<string, string>;
 }
 
 export const MODEL_PRESETS: Record<string, DoubaoModelPreset> = {
@@ -45,6 +54,7 @@ export const MODEL_PRESETS: Record<string, DoubaoModelPreset> = {
     id: 'doubao-fast',
     name: '豆包 · 快速',
     itemId: 0,
+    menuType: 0,
     modelItemKey: '0',
     modeId: '1',
     agentMode: 2,
@@ -55,41 +65,49 @@ export const MODEL_PRESETS: Record<string, DoubaoModelPreset> = {
     id: 'doubao-expert',
     name: '豆包 · 专家',
     itemId: 3,
+    menuType: 3,
     modelItemKey: '3',
     modeId: '1',
     agentMode: 2,
     reasoningEffort: 4,
     deepThink: true,
+    modelExtraParams: { total_window_size: '256000' },
   },
   'doubao-work': {
     id: 'doubao-work',
     name: '豆包 · 工作任务 Auto',
     itemId: 9,
+    menuType: 9,
     modelItemKey: '9',
     modeId: '3',
     agentMode: 1,
     reasoningEffort: 5,
     deepThink: false,
+    modelExtraParams: { total_window_size: '256000' },
   },
   'doubao-work-pro': {
     id: 'doubao-work-pro',
     name: '豆包 · 工作任务 Pro',
     itemId: 5,
+    menuType: 5,
     modelItemKey: '5',
     modeId: '3',
     agentMode: 1,
     reasoningEffort: 5,
     deepThink: false,
+    modelExtraParams: { total_window_size: '256000' },
   },
   'doubao-2.1-lite': {
     id: 'doubao-2.1-lite',
     name: '豆包 2.1 Lite',
     itemId: 10001,
+    menuType: 10001,
     modelItemKey: 'seed-lite-7b',
     modeId: '3',
     agentMode: 1,
     reasoningEffort: 5,
     deepThink: false,
+    modelExtraParams: { memory_profile: '256k', total_window_size: '256000' },
   },
 };
 
@@ -160,6 +178,25 @@ export interface Settings {
   // —— 请求 ——
   requestTimeoutMs: number;
 
+  // —— 附件上传（ImageX）——
+  uploadEnabled: boolean;
+  maxAttachmentBytes: number;
+  maxAttachments: number;
+  allowPrivateUrls: boolean;
+  uploadTimeoutMs: number;
+  prepareUploadPath: string;
+  preHandlePath: string;
+  topPath: string;
+  uploadTenantId: string;
+  uploadSceneId: string;
+
+  // —— 会话清理 ——
+  autoDeleteConversation: boolean;
+  cleanupTimeoutMs: number;
+
+  // —— 思考展示 ——
+  emitThinkingSummary: boolean;
+
   // —— 模型注册 ——
   availableModels: string[];
 
@@ -217,6 +254,22 @@ export const settings: Settings = {
   autoLogin: envBool('DOUBAO_AUTO_LOGIN', false),
 
   requestTimeoutMs: parseInt(env('DOUBAO_REQUEST_TIMEOUT_MS', '600000'), 10),
+
+  uploadEnabled: envBool('DOUBAO_UPLOAD', true),
+  maxAttachmentBytes: Math.max(1, envInt('DOUBAO_MAX_ATTACHMENT_MB', 20)) * 1024 * 1024,
+  maxAttachments: Math.max(1, envInt('DOUBAO_MAX_ATTACHMENTS', 10)),
+  allowPrivateUrls: envBool('DOUBAO_ALLOW_PRIVATE_URLS', false),
+  uploadTimeoutMs: Math.max(1000, envInt('DOUBAO_UPLOAD_TIMEOUT_MS', 120000)),
+  prepareUploadPath: env('DOUBAO_PREPARE_UPLOAD_PATH', '/alice/resource/prepare_upload'),
+  preHandlePath: env('DOUBAO_PRE_HANDLE_PATH', '/alice/message/pre_handle_v2_without_conv'),
+  topPath: env('DOUBAO_TOP_PATH', '/top/v1'),
+  uploadTenantId: env('DOUBAO_UPLOAD_TENANT_ID', '5'),
+  uploadSceneId: env('DOUBAO_UPLOAD_SCENE_ID', '5'),
+
+  autoDeleteConversation: envBool('DOUBAO_AUTO_DELETE_CONVERSATION', true),
+  cleanupTimeoutMs: Math.max(1000, envInt('DOUBAO_CLEANUP_TIMEOUT_MS', 10000)),
+
+  emitThinkingSummary: envBool('DOUBAO_THINKING_SUMMARY', true),
 
   availableModels: (process.env.DOUBAO_MODELS || '')
     .split(',')

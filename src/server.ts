@@ -13,6 +13,7 @@ import { settings } from './config';
 import { forwardChatCompletions } from './openai';
 import { getAuthStatus, initTokenManager } from './auth';
 import { getNeedsCaptcha, resetCaptcha } from './doubaoClient';
+import { getCleanupStats } from './conversationCleanup';
 import { PluginClient, PLUGIN_ID, registeredModels } from './pluginClient';
 
 export function createApp(): Hono {
@@ -43,6 +44,7 @@ export function createApp(): Hono {
       base_url: settings.baseUrl,
       chat_mode: settings.chatMode,
       needs_captcha: getNeedsCaptcha(),
+      conversation_cleanup: getCleanupStats(),
       models: registeredModels().map((m) => m.display_name),
       auth: getAuthStatus(),
     }),

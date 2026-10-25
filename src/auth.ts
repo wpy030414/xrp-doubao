@@ -18,7 +18,8 @@ import { CookieJar } from './cookieJar';
 import * as store from './credentialStore';
 import { generateDeviceIdentity, normalizeDeviceIdentity, type DeviceIdentity } from './device';
 import { DoubaoWebLogin, queryDoubaoAccount } from './webLogin';
-import { startLoginServer, type LoginServer } from './loginPage';
+import { DouyinOAuthLogin } from './douyinLogin';
+import { startLoginServer, startDouyinLoginServer, type LoginServer } from './loginPage';
 import { openExternal } from './openBrowser';
 import type { DoubaoAuthState, StoredSession } from './types';
 
@@ -123,72 +124,113 @@ export interface InteractiveLoginOptions {
   signal?: AbortSignal;
 }
 
+function abortPromise(signal?: AbortSignal): Promise<never> | null {
+  if (!signal) return null;
+  return new Promise<never>((_, reject) => {
+    if (signal.aborted) reject(new Error('登录已取消'));
+    signal.addEventListener('abort', () => reject(new Error('登录已取消')), { once: true });
+  });
+}
+
+function persistLogin(session: StoredSession): DoubaoAuthState {
+  const auth: DoubaoAuthState = { ...session, source: 'web' };
+  writeStore(auth);
+  cached = auth;
+  lastAuthError = '';
+  const kind = store.describeKind(store.readBlob(settings.credentialPath));
+  console.log(
+    `登录成功：uid=${auth.uid || '<空>'} 账号=${auth.nickname || '未知'} Cookie=${auth.cookies.length} 条`,
+  );
+  console.log(`凭证已加密保存到 ${settings.credentialPath}（存储形态 ${kind}）`);
+  return auth;
+}
+
+/** 抖音 OAuth：直接打开官方授权页，本地接收回调 */
+async function interactiveDouyinLogin(opts: InteractiveLoginOptions): Promise<DoubaoAuthState> {
+  const flow = new DouyinOAuthLogin();
+  let server: LoginServer | null = null;
+  try {
+    server = await startDouyinLoginServer(flow, settings.loginPort);
+    const oauthUrl = await flow.begin();
+    console.log('\n=== 抖音授权登录 ===');
+    console.log(`已打开抖音官方授权页（${Math.round(settings.loginTimeoutMs / 60000)} 分钟内有效）：`);
+    console.log(`  ${oauthUrl}\n`);
+    console.log('请在浏览器中用抖音 App 扫码授权；授权完成后会自动回到本机。');
+    console.log('本流程不读取豆包电脑版的任何文件或凭证。\n');
+    console.log(`本地回调：${flow.getRedirectUri()}\n`);
+
+    opts.onLoginPage?.(oauthUrl);
+    if (opts.openBrowser !== false) openExternal(oauthUrl);
+
+    const abort = abortPromise(opts.signal);
+    const state = await (abort ? Promise.race([flow.waitForCallback(), abort]) : flow.waitForCallback());
+    if (state.status !== 'confirmed') {
+      throw new Error(state.error ? `${state.message}（${state.error}）` : state.message);
+    }
+    const session = flow.getSession();
+    if (!session) throw new Error('登录成功但未获得会话');
+    return persistLogin(session);
+  } finally {
+    if (server) await server.close().catch(() => {});
+  }
+}
+
+/** 豆包扫码：本机展示豆包网页登录二维码 */
+async function interactiveDoubaoQrLogin(opts: InteractiveLoginOptions): Promise<DoubaoAuthState> {
+  const flow = new DoubaoWebLogin();
+  const qr = await flow.begin();
+  let server: LoginServer | null = null;
+  let qrFile: string | null = null;
+  try {
+    server = await startLoginServer(flow, settings.loginPort);
+    console.log('\n=== 豆包网页登录 ===');
+    console.log(`请在浏览器打开登录页（${Math.round(settings.loginTimeoutMs / 60000)} 分钟内有效）：`);
+    console.log(`  ${server.url}\n`);
+    console.log('用手机端豆包 / 抖音扫描页面中的二维码，并确认登录。');
+    console.log('本流程不读取豆包电脑版的任何文件或凭证。\n');
+
+    try {
+      qrFile = path.join(os.tmpdir(), `xrp-doubao-login-qr-${process.pid}.png`);
+      fs.writeFileSync(qrFile, Buffer.from(qr.qrBase64, 'base64'), { mode: 0o600 });
+      console.log(`二维码图片（备用）：${qrFile}\n`);
+    } catch {
+      qrFile = null;
+    }
+
+    opts.onLoginPage?.(server.url);
+    if (opts.openBrowser !== false) openExternal(server.url);
+
+    const abort = abortPromise(opts.signal);
+    flow.startPolling();
+    const state = await (abort ? Promise.race([flow.waitForDone(), abort]) : flow.waitForDone());
+    if (state.status !== 'confirmed') {
+      throw new Error(state.error ? `${state.message}（${state.error}）` : state.message);
+    }
+    const session = flow.getSession();
+    if (!session) throw new Error('登录成功但未获得会话');
+    return persistLogin(session);
+  } finally {
+    flow.stopPolling();
+    if (server) await server.close().catch(() => {});
+    if (qrFile) {
+      try {
+        fs.unlinkSync(qrFile);
+      } catch {
+        /* 忽略 */
+      }
+    }
+  }
+}
+
 /**
- * 交互式网页扫码登录：本地登录页 → 手机扫码 → 收集 Cookie → 加密落盘。
+ * 交互式网页登录：默认直接打开抖音官方授权页；DOUBAO_LOGIN_FLOW=doubao 时改用豆包扫码页。
  * 不读取豆包电脑版，不依赖本机安装的豆包 App。
  */
 export async function interactiveLogin(opts: InteractiveLoginOptions = {}): Promise<DoubaoAuthState> {
   if (loginInFlight) return loginInFlight;
   loginInFlight = (async () => {
-    const flow = new DoubaoWebLogin();
-    const qr = await flow.begin();
-    let server: LoginServer | null = null;
-    let qrFile: string | null = null;
-    try {
-      server = await startLoginServer(flow, settings.loginPort);
-      console.log('\n=== 豆包网页登录 ===');
-      console.log(`请在浏览器打开登录页（${Math.round(settings.loginTimeoutMs / 60000)} 分钟内有效）：`);
-      console.log(`  ${server.url}\n`);
-      console.log('用手机端豆包 / 抖音扫描页面中的二维码，并确认登录。');
-      console.log('本流程不读取豆包电脑版的任何文件或凭证。\n');
-
-      try {
-        qrFile = path.join(os.tmpdir(), `xrp-doubao-login-qr-${process.pid}.png`);
-        fs.writeFileSync(qrFile, Buffer.from(qr.qrBase64, 'base64'), { mode: 0o600 });
-        console.log(`二维码图片（备用）：${qrFile}\n`);
-      } catch {
-        qrFile = null;
-      }
-
-      opts.onLoginPage?.(server.url);
-      if (opts.openBrowser !== false) openExternal(server.url);
-
-      const abort = opts.signal
-        ? new Promise<never>((_, reject) => {
-            if (opts.signal!.aborted) reject(new Error('登录已取消'));
-            opts.signal!.addEventListener('abort', () => reject(new Error('登录已取消')), { once: true });
-          })
-        : null;
-
-      flow.startPolling();
-      const state = await (abort ? Promise.race([flow.waitForDone(), abort]) : flow.waitForDone());
-      if (state.status !== 'confirmed') {
-        throw new Error(state.error ? `${state.message}（${state.error}）` : state.message);
-      }
-      const session = flow.getSession();
-      if (!session) throw new Error('登录成功但未获得会话');
-
-      const auth: DoubaoAuthState = { ...session, source: 'web' };
-      writeStore(auth);
-      cached = auth;
-      lastAuthError = '';
-      const kind = store.describeKind(store.readBlob(settings.credentialPath));
-      console.log(
-        `登录成功：uid=${auth.uid || '<空>'} 账号=${auth.nickname || '未知'} Cookie=${auth.cookies.length} 条`,
-      );
-      console.log(`凭证已加密保存到 ${settings.credentialPath}（存储形态 ${kind}）`);
-      return auth;
-    } finally {
-      flow.stopPolling();
-      if (server) await server.close().catch(() => {});
-      if (qrFile) {
-        try {
-          fs.unlinkSync(qrFile);
-        } catch {
-          /* 忽略 */
-        }
-      }
-    }
+    if (settings.loginFlow === 'doubao') return interactiveDoubaoQrLogin(opts);
+    return interactiveDouyinLogin(opts);
   })().finally(() => {
     loginInFlight = null;
   });

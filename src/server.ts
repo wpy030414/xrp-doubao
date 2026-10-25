@@ -143,7 +143,7 @@ export async function startServer(opts: { port?: number; connectRouter?: boolean
   });
 
   const actualPort: number = server.address()?.port ?? port;
-  const pluginClient = opts.connectRouter === false ? null : new PluginClient();
+  const pluginClient = opts.connectRouter === false ? null : new PluginClient(actualPort);
 
   const close = async () => {
     pluginClient?.close();

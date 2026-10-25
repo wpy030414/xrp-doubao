@@ -12,7 +12,7 @@
 │ (Claude    │                                 │  :19068      │                       │  :19071                   │
 │  Code等)   │ <────────────────────────────── │              │ <──────────────────── │  - OpenAI 翻译            │
 └────────────┘        SSE / JSON               └──────────────┘                       │  - Cookie 凭证            │
-                                                                                      │  - 登录页 :19100（临时）   │
+                                                                                      │  - 本地回调 :19100（临时） │
                                                                                       └────────────┬─────────────┘
                                                                                                    │ Cookie + SSE
                                                                                                    ▼
@@ -24,7 +24,7 @@
                                                                                       └──────────────────────────┘
 ```
 
-登录期间，插件在 `127.0.0.1:19100` 托管一个极小的登录页；页面只展示二维码和状态，不接触凭证。
+登录期间，插件在 `127.0.0.1:19100` 托管一个 OAuth 回调服务器（默认）；浏览器直接打开抖音官方授权页，页面与二维码都由 `open.douyin.com` 托管。备用流程 `DOUBAO_LOGIN_FLOW=doubao` 才在本机展示豆包扫码页。
 
 ## 2. 设计原则
 
@@ -33,7 +33,7 @@
 | **纯翻译层** | 只做 OpenAI ↔ 豆包网页协议转换，不引入业务逻辑、不做 prompt engineering |
 | **凭证自持** | Router 不再管理密钥，对插件只发占位凭证；插件用自身 Cookie 访问上游 |
 | **无状态** | 每个对话请求独立；不维护服务端会话表，客户端带完整 history |
-| **无 App 依赖** | 不读取 / 解密 / 写回豆包电脑版文件；登录页由官方 passport 接口驱动 |
+| **无 App 依赖** | 不读取 / 解密 / 写回豆包电脑版文件；默认直接打开抖音官方授权页，本地只接收 OAuth 回调 |
 | **错误透明** | 登录失效、风控、上游故障分别映射；不静默重试成空响应 |
 | **可回退** | 主端点 `/chat/completion` 不可用时自动回退 `/samantha`，语义不变 |
 | **凭据最小暴露** | 日志 / 诊断只输出 Cookie 名称与长度；凭证加密落盘 |
@@ -46,8 +46,10 @@ src/
 ├── server.ts             # Hono 路由 / 端口释放 / 启动 / 优雅退出
 ├── config.ts             # Settings 单例、模型预设、别名
 ├── pluginClient.ts       # WS 注册（V24 无 keys）/ 心跳 / 重连
-├── webLogin.ts           # 二维码登录状态机
-├── loginPage.ts          # 本机登录页（HTML + /api/status + /qr.png）
+├── douyinLogin.ts        # 抖音 OAuth 授权页 + 本地回调 + code 换会话（默认）
+├── webLogin.ts           # 备用：豆包网页扫码登录状态机
+├── loginPage.ts          # 抖音回调页 / 豆包扫码页（HTML + /api/status）
+├── loginFlow.ts          # 登录状态 / 二维码类型
 ├── auth.ts               # 会话缓存 / 加密落盘 / 灾备 Cookie / 登录编排
 ├── cookieJar.ts          # Cookie 罐（domain/path/expiry）
 ├── credentialStore.ts    # DPAPI / AES / 明文
@@ -57,7 +59,6 @@ src/
 ├── sse.ts                # 通用 SSE 解析
 ├── doubaoClient.ts       # 上游请求、SSE 解析、错误分类、回退
 ├── openai.ts             # OpenAI chunk / 非流式聚合 / 错误映射
-├── openai.ts             # 同上
 └── types.ts              # StoredSession / DoubaoAuthState
 
 scripts/
@@ -82,24 +83,33 @@ docs/
 
 ## 4. 关键数据流
 
-### 4.1 登录
+### 4.1 登录（默认：抖音 OAuth）
 
 ```
 pnpm log-in
   → auth.interactiveLogin()
-      → new DoubaoWebLogin()
-      → flow.begin()
-          GET /                         (ttwid)
-          GET /passport/safe/csrf_token (passport_csrf_token)
-          GET /passport/web/get_qrcode  (token + PNG)
-      → startLoginServer(flow, 19100)
-      → openExternal(登录页)
-      → flow.startPolling()
-          GET /passport/web/check_qrconnect (每 1.5s)
-          confirmed → 跟随 redirect_url → 收集 sessionid
-                    → GET /passport/account/info/v2/ (尽力)
-      → flow.waitForDone()
-      → auth.writeStore(session)          (DPAPI / AES)
+      → new DouyinOAuthLogin()
+      → startDouyinLoginServer(flow, 19100)   // 本地回调服务器
+      → flow.begin()                          // 生成 state + OAuth URL
+      → openExternal(open.douyin.com/...)
+      → 用户在抖音官方页扫码 / 短信验证码授权
+      → 抖音回跳 http://127.0.0.1:19100/douyin/callback?code&state
+      → flow.handleCallback(code, state)
+          GET  /passport/safe/csrf_token
+          POST /passport/web/auth/bind_with_mobile_login  (code → sessionid)
+          (profile_key) POST /passport/web/auth/login
+          GET  /passport/account/info/v2 (尽力)
+      → auth.writeStore(session)              (DPAPI / AES)
+```
+
+备用（`DOUBAO_LOGIN_FLOW=doubao`）：
+
+```
+auth.interactiveLogin()
+  → new DoubaoWebLogin() → begin() → startLoginServer(flow, 19100)
+  → openExternal(本机登录页) → 手机扫码
+  → 轮询 check_qrconnect → confirmed → 跟随 redirect_url → Cookie
+  → auth.writeStore(session)
 ```
 
 ### 4.2 对话

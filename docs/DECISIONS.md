@@ -2,18 +2,29 @@
 
 > 记录影响结构、协议或安全边界的设计决策，以及被放弃的替代方案。
 
-## D-1 纯 HTTP 二维码登录，不引入 Playwright
+## D-1 默认直接打开抖音官方 OAuth 授权页 + 本地回调
 
-**决策**：登录只使用 `www.doubao.com/passport` 的 CSRF / 二维码 / 轮询接口，用 Node `fetch` + Cookie 罐完成。
+**决策**：`pnpm log-in` 打开 `open.douyin.com/platform/oauth/connect`，`redirect_uri` 指向 `http://127.0.0.1:<port>/douyin/callback`；抖音回调 `code` 后，用豆包 passport 的 `bind_with_mobile_login` 换取会话 Cookie。备用 `DOUBAO_LOGIN_FLOW=doubao` 保留豆包扫码登录。
 
 **原因**：
-- 实测 CSRF、二维码、`check_qrconnect` 均不需要浏览器 JS 或 `a_bogus`
-- 不引入 ~100MB 的浏览器依赖；部署只需 Node
+- 用户要求“运行脚本登录时直接弹出抖音网页”，官方页面的二维码才是真正的抖音授权二维码（解码为 `aweme://authorizedy?...`）
+- 官方页面同时支持扫码与短信验证码，用户不需要在本机安装豆包电脑版
+- `redirect_uri=localhost` 已被授权页接受；本机回调可以纯 Node HTTP 接住 `code`，无需 Playwright
 - 不读取豆包电脑版，不启动无头浏览器
 
-**代价**：无法自动完成手机号 / 密码 / 验证码登录；二维码必须由账号本人在手机端确认。
+**代价**：登录需要本机回调端口可达；抖音 / 豆包没有 refresh token；授权页样式与流程由抖音控制。
 
-**放弃的方案**：Playwright 驱动官方登录页并提取 Cookie。更通用，但依赖重、易受反自动化检测影响，且与“插件应轻量”冲突。
+**放弃的方案**：
+- 自己绘制二维码：用户无法确认是否为真正的抖音授权码，已改为直接打开官方页
+- Playwright 驱动官方页并提取 Cookie：依赖重，且没必要——本地回调 + code 换票更简单
+- 把 `redirect_uri` 改成公网地址：需要额外部署与 TLS，不符合本机插件定位
+
+### D-1.1 保留豆包扫码登录作为备用
+
+**决策**：`DOUBAO_LOGIN_FLOW=doubao` 时仍走豆包网页登录弹窗的 `get_qrcode` / `check_qrconnect`。
+
+**原因**：部分账号 / 环境可能不接受抖音 OAuth 的 localhost 回调；豆包扫码链路是官方同款，作为兜底。
+
 
 ## D-2 不生成 `a_bogus`，用 `/samantha` 回退
 

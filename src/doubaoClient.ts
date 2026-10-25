@@ -550,10 +550,12 @@ export class DoubaoClient {
         return;
       }
       if (bt === 2008) {
-        const think = pickString(content?.think, content?.text_block?.text, content?.text);
-        if (think) {
+        const think = pickString(content?.think);
+        const answer = pickString(content?.text_block?.text, content?.text);
+        if (think) out.push({ reasoning: think });
+        if (answer) {
           blockTextInEvent = true;
-          out.push({ reasoning: think });
+          out.push({ text: answer });
         }
         return;
       }

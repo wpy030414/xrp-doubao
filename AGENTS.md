@@ -6,12 +6,12 @@
 
 - 本项目是 **豆包（Doubao）网页通道的 xrl-router 插件**：把豆包网页端的私有 SSE 对话接口包装成 OpenAI Chat Completions 兼容的本地服务
 - 上游：`https://www.doubao.com`
-- 凭证：**仅支持自包含网页扫码登录**（二维码 → 手机确认 → 轮询 → 收集 Cookie），DPAPI/AES 加密落盘；不依赖、不读取豆包电脑版
+- 凭证：**仅支持自包含网页 OAuth 登录**（直接打开抖音官方授权页 → 本地回调 `code` → 豆包 passport 换会话 Cookie），DPAPI/AES 加密落盘；不依赖、不读取豆包电脑版
 - 协议边界：只桥接 OpenAI Chat Completions（`/v1/chat/completions`）；Anthropic Messages 客户端由 xrl-router 转换后调用本插件
 
 ## 边界与范围
 
-- 范围内：OpenAI Chat Completions 转发（流式 + 非流式聚合）、自包含网页登录 / Cookie 收集 / 加密落盘、模型模式映射、`/chat/completion` → `/samantha` 回退、WebSocket 插件注册 / 心跳 / 重连（V24 契约）、SSE 事件解析、风控状态上报
+- 范围内：OpenAI Chat Completions 转发（流式 + 非流式聚合）、抖音 OAuth 网页登录 / 本地回调 / Cookie 收集 / 加密落盘、模型模式映射、`/chat/completion` → `/samantha` 回退、WebSocket 插件注册 / 心跳 / 重连（V24 契约）、SSE 事件解析、风控状态上报
 - 非目标（明确排除）：
   - **不实现 Anthropic Messages API** — 由 xrl-router 负责协议转换
   - **不做账号池 / 多 key 负载均衡** — xrl-router 的职责
@@ -65,7 +65,7 @@
 
 ```bash
 pnpm install
-pnpm log-in             # 本机登录页 + 手机扫码，凭证加密落盘
+pnpm log-in             # 打开抖音官方授权页，本地回调换票，凭证加密落盘
 pnpm check-auth        # 诊断凭证与账号（不打印 Cookie 值）
 pnpm serve             # 启动插件（19071）
 pnpm test              # 离线 E2E（mock 豆包）
@@ -76,8 +76,8 @@ pnpm typecheck
 
 | 现状 | 原因 |
 |---|---|
-| 首登需真人扫码 | 二维码要账号本人用手机端确认，插件不经手口令 |
-| 无 refresh token | 豆包网页登录不返回 refresh token；失效只能重新扫码 |
+| 首登需真人在抖音授权页授权 | 扫码或短信验证码由抖音托管，插件不经手口令 |
+| 无 refresh token | 豆包网页登录不返回 refresh token；失效只能重新授权 |
 | 主端点可能回退 `/samantha` | `/chat/completion` 的风控可能要求 `a_bogus`；回退是设计行为 |
 | 风控验证码不能自动绕过 | 不做 captcha 破解；只能人工验证或重新登录 |
 | 账号信息接口可能失败 | `/passport/account/info/v2/` 可能要求 `a_bogus`；失败不影响对话 |
@@ -100,8 +100,10 @@ pnpm typecheck
 - `src/server.ts` — Hono 路由、端口释放、启动
 - `src/config.ts` — Settings 单例、模型预设、环境变量
 - `src/pluginClient.ts` — WebSocket 注册 / 心跳 / 重连（V24 无 keys）
-- `src/webLogin.ts` — 自包含二维码登录流程
-- `src/loginPage.ts` — 本机登录页与状态 API
+- `src/douyinLogin.ts` — 抖音 OAuth 授权页 + 本地回调 + code 换会话
+- `src/webLogin.ts` — 备用：豆包网页扫码登录流程
+- `src/loginPage.ts` — 抖音回调页 / 豆包扫码登录页与状态 API
+- `src/loginFlow.ts` — 登录状态与二维码类型
 - `src/auth.ts` — 会话缓存 / 加密落盘 / 灾备 Cookie / 登录编排
 - `src/cookieJar.ts` — Cookie 罐
 - `src/credentialStore.ts` — DPAPI / AES / 明文三形态

@@ -19,25 +19,9 @@ import { CookieJar } from './cookieJar';
 import { generateDeviceIdentity, type DeviceIdentity } from './device';
 import { loginHeaders, accountParams, toQuery } from './securityParams';
 import type { StoredSession } from './types';
+import type { WebLoginStatus, WebLoginState, QrCodePayload } from './loginFlow';
 
-export type WebLoginStatus = 'idle' | 'new' | 'scanned' | 'confirmed' | 'expired' | 'error';
-
-export interface WebLoginState {
-  status: WebLoginStatus;
-  message: string;
-  uid?: string;
-  nickname?: string;
-  done: boolean;
-  error?: string;
-  expireAt?: number;
-}
-
-export interface QrCodePayload {
-  token: string;
-  qrDataUrl: string;
-  qrBase64: string;
-  expireAt: number;
-}
+export type { WebLoginStatus, WebLoginState, QrCodePayload } from './loginFlow';
 
 export interface WebLoginOptions {
   baseUrl?: string;
@@ -74,6 +58,9 @@ function pickString(...values: unknown[]): string {
 }
 
 export class DoubaoWebLogin {
+  readonly mode = 'doubao' as const;
+  readonly title = '豆包网页登录';
+  readonly hint = '用手机端豆包 / 抖音扫描二维码确认。本流程不读取豆包电脑版，也不依赖本机安装的任何豆包客户端。';
   readonly baseUrl: string;
   readonly authBaseUrl: string;
   readonly aid: string;

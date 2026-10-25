@@ -143,6 +143,11 @@ export interface Settings {
   authSecret: string;
 
   // —— 登录行为 ——
+  loginFlow: 'douyin' | 'doubao';
+  douyinOauthBaseUrl: string;
+  douyinClientKey: string;
+  douyinScope: string;
+  douyinOptionalScope: string;
   loginTimeoutMs: number;
   loginPollMs: number;
   autoLogin: boolean;
@@ -194,6 +199,11 @@ export const settings: Settings = {
   storeMode: (env('DOUBAO_STORE_MODE', 'auto') as Settings['storeMode']),
   authSecret: env('DOUBAO_AUTH_SECRET', ''),
 
+  loginFlow: (env('DOUBAO_LOGIN_FLOW', 'douyin') as Settings['loginFlow']),
+  douyinOauthBaseUrl: env('DOUBAO_DOUYIN_OAUTH_BASE_URL', 'https://open.douyin.com').replace(/\/+$/, ''),
+  douyinClientKey: env('DOUBAO_DOUYIN_CLIENT_KEY', 'aw4293rjg7ggbx9m'),
+  douyinScope: env('DOUBAO_DOUYIN_SCOPE', 'user_info,mobile'),
+  douyinOptionalScope: env('DOUBAO_DOUYIN_OPTIONAL_SCOPE', 'mobile,1'),
   loginTimeoutMs: parseInt(env('DOUBAO_LOGIN_TIMEOUT_MS', String(5 * 60_000)), 10),
   loginPollMs: parseInt(env('DOUBAO_LOGIN_POLL_MS', '1500'), 10),
   autoLogin: envBool('DOUBAO_AUTO_LOGIN', false),

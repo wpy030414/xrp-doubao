@@ -35,6 +35,8 @@ before(async () => {
 
   mods = {
     webLogin: await import('../src/webLogin'),
+    douyinLogin: await import('../src/douyinLogin'),
+    loginPage: await import('../src/loginPage'),
     auth: await import('../src/auth'),
     client: await import('../src/doubaoClient'),
     server: await import('../src/server'),
@@ -226,6 +228,111 @@ test('登录超时：waitForDone 返回 error 而不是永久挂起', async () =
   } finally {
     flow.stopPolling();
   }
+});
+
+test('抖音 OAuth：官方授权 URL + 本地回调 + code 换会话', async () => {
+  mock.reset();
+  const flow = new mods.douyinLogin.DouyinOAuthLogin({
+    baseUrl: mock.url,
+    oauthBaseUrl: 'https://open.douyin.com',
+    clientKey: 'aw4293rjg7ggbx9m',
+    device: DEVICE,
+    aid: '497858',
+    timeoutMs: 1000,
+  });
+  const server = await mods.loginPage.startDouyinLoginServer(flow, 0);
+  try {
+    const oauthUrl = await flow.begin();
+    assert.match(oauthUrl, /^https:\/\/open\.douyin\.com\/platform\/oauth\/connect\?/);
+    assert.match(oauthUrl, /client_key=aw4293rjg7ggbx9m/);
+    const redirect = encodeURIComponent(`http://127.0.0.1:${server.port}/douyin/callback`);
+    assert.ok(oauthUrl.includes(`redirect_uri=${redirect}`));
+    assert.match(oauthUrl, /state=/);
+
+    const waiting = flow.waitForCallback(1000);
+    const state = await flow.handleCallback('mock-douyin-code', flow.getStateToken());
+    assert.equal(state.status, 'confirmed');
+    assert.equal(state.uid, '12345');
+    assert.equal(state.nickname, '测试用户');
+    assert.equal((await waiting).status, 'confirmed');
+    const session = flow.getSession();
+    assert.ok(session);
+    assert.ok(session!.cookies.some((c: any) => c.name === 'sessionid' && c.value === 'mock-session'));
+    assert.ok(mock.state.loginRequests.includes('bind:mock-douyin-code'));
+  } finally {
+    await server.close();
+  }
+});
+
+test('抖音 OAuth：本地 /douyin/callback 页面完成登录', async () => {
+  mock.reset();
+  const flow = new mods.douyinLogin.DouyinOAuthLogin({
+    baseUrl: mock.url,
+    oauthBaseUrl: 'https://open.douyin.com',
+    device: DEVICE,
+    aid: '497858',
+    timeoutMs: 1000,
+  });
+  const server = await mods.loginPage.startDouyinLoginServer(flow, 0);
+  try {
+    await flow.begin();
+    const cb = await fetch(
+      `${server.url}douyin/callback?code=mock-douyin-code&state=${encodeURIComponent(flow.getStateToken())}`,
+    );
+    assert.equal(cb.status, 200);
+    const html = await cb.text();
+    assert.match(html, /抖音授权完成/);
+    assert.match(html, /12345/);
+    assert.equal(flow.getState().status, 'confirmed');
+  } finally {
+    await server.close();
+  }
+});
+
+test('抖音 OAuth：state 不匹配 / 非法 code / profile_key 回退 / 超时', async () => {
+  mock.reset();
+  const make = () =>
+    new mods.douyinLogin.DouyinOAuthLogin({
+      baseUrl: mock.url,
+      oauthBaseUrl: 'https://open.douyin.com',
+      device: DEVICE,
+      aid: '497858',
+      timeoutMs: 1000,
+    });
+
+  const flow1 = make();
+  const s1 = await flow1.handleCallback('mock-douyin-code', 'wrong-state');
+  assert.equal(s1.status, 'error');
+  assert.equal(s1.done, true);
+
+  const flow2 = make();
+  const server2 = await mods.loginPage.startDouyinLoginServer(flow2, 0);
+  try {
+    await flow2.begin();
+    const s2 = await flow2.handleCallback('bad-code', flow2.getStateToken());
+    assert.equal(s2.status, 'error');
+    assert.match(s2.message, /非法应用/);
+  } finally {
+    await server2.close();
+  }
+
+  mock.reset();
+  const flow3 = make();
+  const server3 = await mods.loginPage.startDouyinLoginServer(flow3, 0);
+  try {
+    await flow3.begin();
+    const s3 = await flow3.handleCallback('mock-douyin-needs-profile', flow3.getStateToken());
+    assert.equal(s3.status, 'confirmed');
+    assert.ok(mock.state.loginRequests.includes('login:mock-profile-key'));
+    assert.equal(flow3.getSession()?.cookies.some((c: any) => c.name === 'sessionid'), true);
+  } finally {
+    await server3.close();
+  }
+
+  const flow4 = make();
+  const s4 = await flow4.waitForCallback(50);
+  assert.equal(s4.status, 'error');
+  assert.equal(s4.done, true);
 });
 
 test('认证状态：写入 / 读取 / 账号信息 / 强制重登提示', async () => {

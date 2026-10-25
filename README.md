@@ -1,16 +1,17 @@
 # xrp-doubao
 
-> 豆包（Doubao）网页通道的 xrl-router 插件 — **唯一登录方式为自包含网页扫码登录**，把豆包网页端的私有 SSE 对话接口包装成 OpenAI Chat Completions 兼容服务。
+> 豆包（Doubao）网页通道的 xrl-router 插件 — **唯一登录方式为自包含网页 OAuth**（直接打开抖音官方授权页，本地回调换票），把豆包网页端的私有 SSE 对话接口包装成 OpenAI Chat Completions 兼容服务。
 
 ```
 OpenAI / Anthropic 客户端 → xrl-router :19068 → 本插件 :19071 → www.doubao.com
-                                      ↑ 网页登录页 :19100（仅登录期间）
+                                      ↑ 本地回调 :19100（仅登录期间）
 ```
 
 ## 这是什么？
 
 - xrl-router 的豆包通道插件，纯转发 / 协议适配层
-- **自包含登录**：插件自己申请豆包网页登录二维码、在本机页面展示、轮询确认、收集会话 Cookie；本机**不需要安装或读取豆包电脑版**，也不读取任何 App 凭证文件
+- **自包含登录**：`pnpm log-in` 直接打开抖音官方授权页（`open.douyin.com`），用户在页面上扫码或验证码授权；抖音回跳本机 `127.0.0.1:19100/douyin/callback`，插件用一次性 `code` 调豆包 passport 换取会话 Cookie，再加密落盘
+- 本机**不需要安装或读取豆包电脑版**，也不读取任何 App 凭证文件；抖音授权页本身支持扫码与短信验证码两种方式
 - 凭证本地静态加密存储（Windows 用 DPAPI，跨平台用 passphrase AES），不落明文、不进 git
 - 通过 WebSocket 向 xrl-router 注册（V24 契约，无 `keys`），由 Router 统一做鉴权、路由、密钥轮转
 - 支持流式 / 非流式、`reasoning_content`（思考链）、模型模式映射、主端点失败回退 `/samantha`、风控状态上报
@@ -18,7 +19,7 @@ OpenAI / Anthropic 客户端 → xrl-router :19068 → 本插件 :19071 → www.
 ## 前置要求
 
 - Node.js ≥ 20、pnpm
-- **不需要豆包电脑版**；只需要一个能用浏览器 / 手机端登录豆包网页的账号
+- **不需要豆包电脑版**；只需要一个能登录抖音 / 豆包网页的账号
 - xrl-router 已运行（默认 `http://localhost:19068`）
 
 ## 快速开始
@@ -26,19 +27,22 @@ OpenAI / Anthropic 客户端 → xrl-router :19068 → 本插件 :19071 → www.
 ```bash
 pnpm install
 cp .env.example .env   # 可选：默认值已能跑通
-pnpm log-in             # 启动本机登录页并打开浏览器，手机扫码确认后凭证加密落盘
+pnpm log-in             # 直接打开抖音官方授权页，授权后本地回调换票并加密落盘
 pnpm check-auth        # 验证凭证、Cookie 名称、账号信息（不打印 Cookie 值）
 pnpm serve             # 启动插件，监听 19071 并连接 xrl-router
 ```
 
 `pnpm log-in` 会：
 
-1. 请求 `www.doubao.com/passport/safe/csrf_token/` 获取 CSRF；
-2. 请求 `/passport/web/get_qrcode/` 获取一次性二维码 token 与 PNG；
-3. 在本机 `127.0.0.1:19100` 展示登录页（二维码 + 扫码状态）；
-4. 每 1.5s 轮询 `/passport/web/check_qrconnect/`；
-5. 手机确认后跟随回跳，收集 `sessionid` 等 Cookie；
-6. 用 DPAPI / AES 加密写入本地凭证文件。
+1. 生成一次性 `state`，打开抖音官方授权页
+   `https://open.douyin.com/platform/oauth/connect?client_key=aw4293rjg7ggbx9m&redirect_uri=http://127.0.0.1:19100/douyin/callback&...`
+2. 页面展示**真正的抖音授权二维码**（也支持页面上的“验证码授权”）
+3. 抖音授权后回跳本机 `/douyin/callback?code=...&state=...`
+4. 校验 `state`，用 `code` 调 `www.doubao.com/passport/web/auth/bind_with_mobile_login/`
+   换取豆包会话 Cookie；必要时走 `profile_key` 二次登录
+5. 用 DPAPI / AES 加密写入本地凭证文件
+
+备用登录形态：设置 `DOUBAO_LOGIN_FLOW=doubao` 可改回“本机展示豆包网页登录二维码”的流程。
 
 首次注册后，插件 provider 在 Router 中默认是 **disabled / pending** 状态，需要确认一次：
 
@@ -81,10 +85,15 @@ pnpm smoke -- --yes --model doubao-fast
 | `DOUBAO_PC_VERSION` | `3.42.5` | 网页端版本参数 |
 | `DOUBAO_BOT_ID` | `7338286299411103781` | 默认 bot id |
 | `DOUBAO_CHAT_MODE` | `auto` | `auto`（主端点失败回退）/ `chat` / `samantha` |
-| `DOUBAO_LOGIN_PORT` | `19100` | 本机登录页端口；占用时自动改用随机端口 |
-| `DOUBAO_LOGIN_TIMEOUT_MS` | `300000` | 扫码等待超时 |
-| `DOUBAO_LOGIN_POLL_MS` | `1500` | 二维码轮询间隔 |
-| `DOUBAO_AUTO_LOGIN` | `0` | 无登录态时服务是否自动打开登录页；默认关闭，改用 `pnpm log-in` |
+| `DOUBAO_LOGIN_FLOW` | `douyin` | `douyin`（直接打开抖音官方授权页）/ `doubao`（本机展示豆包扫码页） |
+| `DOUBAO_DOUYIN_OAUTH_BASE_URL` | `https://open.douyin.com` | 抖音 OAuth 授权域 |
+| `DOUBAO_DOUYIN_CLIENT_KEY` | `aw4293rjg7ggbx9m` | 豆包使用的抖音开放平台 client_key |
+| `DOUBAO_DOUYIN_SCOPE` | `user_info,mobile` | 授权 scope |
+| `DOUBAO_DOUYIN_OPTIONAL_SCOPE` | `mobile,1` | 可选 scope |
+| `DOUBAO_LOGIN_PORT` | `19100` | 本地 OAuth 回调 / 登录页端口；占用时自动改用随机端口 |
+| `DOUBAO_LOGIN_TIMEOUT_MS` | `300000` | 授权等待超时 |
+| `DOUBAO_LOGIN_POLL_MS` | `1500` | 备用豆包扫码流程的轮询间隔 |
+| `DOUBAO_AUTO_LOGIN` | `0` | 无登录态时服务是否自动打开授权页；默认关闭，改用 `pnpm log-in` |
 | `DOUBAO_CREDENTIAL_PATH` | 用户数据目录 | 自包含凭证文件（加密；不进 git） |
 | `DOUBAO_STORE_MODE` | `auto` | 存储形态：`auto` / `dpapi` / `aes` / `plain` |
 | `DOUBAO_AUTH_SECRET` | 空 | AES 模式 passphrase；设置后 `auto` 优先用 AES（跨平台可迁移） |
@@ -97,18 +106,19 @@ pnpm smoke -- --yes --model doubao-fast
 
 ## 登录与凭证
 
-1. `pnpm log-in` 请求二维码 → 本机页面展示 → 手机端豆包 / 抖音扫码确认 → 轮询到 `confirmed`
-2. 跟随 `redirect_url` 收集 `sessionid` / `ttwid` / `passport_csrf_token` 等 Cookie
-3. Cookie 与设备指纹经 DPAPI（Windows，绑定本机本用户）或 passphrase AES-256-GCM 加密，原子写入 `DOUBAO_CREDENTIAL_PATH`
-4. 运行时会话获取顺序：**内存缓存 → 本地凭证存储 → `DOUBAO_COOKIES` 灾备 →（默认不触发登录，提示 `pnpm log-in`）**
-5. 豆包网页登录**不返回 refresh token**；会话失效只能重新扫码。插件不会静默复用或刷新他人凭证
-6. 服务态默认**不静默弹浏览器**：需要无人值守自动登录时设 `DOUBAO_AUTO_LOGIN=1`
+1. `pnpm log-in` 生成 `state` 并直接打开抖音官方授权页；用户在页面上扫码或使用短信验证码授权
+2. 抖音回跳 `http://127.0.0.1:19100/douyin/callback?code=...&state=...`；插件校验 `state`
+3. 用 `code` 调 `www.doubao.com/passport/web/auth/bind_with_mobile_login/` 换取 `sessionid` / `ttwid` / `passport_csrf_token` 等 Cookie；若返回 `profile_key`，再走 `/passport/web/auth/login/` 二次登录
+4. Cookie 与设备指纹经 DPAPI（Windows，绑定本机本用户）或 passphrase AES-256-GCM 加密，原子写入 `DOUBAO_CREDENTIAL_PATH`
+5. 运行时会话获取顺序：**内存缓存 → 本地凭证存储 → `DOUBAO_COOKIES` 灾备 →（默认不触发登录，提示 `pnpm log-in`）**
+6. 豆包登录**不返回 refresh token**；会话失效只能重新授权。插件不会静默复用或刷新他人凭证
+7. 服务态默认**不静默弹浏览器**：需要无人值守自动登录时设 `DOUBAO_AUTO_LOGIN=1`
 
 存储形态选择（`DOUBAO_STORE_MODE=auto`）：Windows 用 DPAPI；设了 `DOUBAO_AUTH_SECRET` 则用 AES（可跨机迁移）；两者都没有时明文落盘并告警（文件权限 0600，仅建议临时用）。
 
 ### 没有手机 App 怎么办？
 
-插件提供的二维码走的是豆包**官方网页登录**同款协议。二维码可以用手机端豆包 / 抖音扫码；如果不想使用任何移动端 App，可以先在浏览器登录豆包网页版，再把浏览器 Cookie 通过 `DOUBAO_COOKIES` 注入（仅建议临时使用，且注意 Cookie 等价于账号密码）。插件本身不依赖、也不读取豆包电脑版。
+默认的抖音官方授权页同时提供「扫码授权」和「验证码授权」（手机号短信），不强制安装 App。若你只想用豆包自己的登录链路，可设置 `DOUBAO_LOGIN_FLOW=doubao`，插件会在本机展示豆包网页登录二维码（可用豆包 / 抖音 App 扫）。两条链路都不读取豆包电脑版；`DOUBAO_COOKIES` 仅作为临时灾备。
 
 ## 模型注册
 
@@ -150,7 +160,7 @@ pnpm smoke -- --yes --model doubao-fast
 
 | 命令 | 作用 |
 |---|---|
-| `pnpm log-in` | 启动本机登录页，网页扫码登录，加密落盘 |
+| `pnpm log-in` | 打开抖音官方授权页，本地回调换票，加密落盘 |
 | `pnpm serve` | 启动插件（19071）并连接 xrl-router |
 | `pnpm check-auth` | 诊断凭证、Cookie 名称 / 长度、账号信息（不打印 Cookie 值） |
 | `pnpm log-out -- --yes` | 删除本地加密凭证 |
@@ -164,20 +174,20 @@ pnpm smoke -- --yes --model doubao-fast
 |---|---|
 | Router 报 `Model not found or not available` | 用模型别名（如 `doubao-fast`）作为 `model`；确认 `plugin-doubao` 已 confirm/enabled |
 | 插件启动后 Router 中模型不可用 | provider 初始为 disabled，执行一次 `/api/plugins/plugin-doubao/confirm` |
-| `pnpm serve` 提示无有效登录态 | 运行 `pnpm log-in` 完成网页扫码，或设 `DOUBAO_AUTO_LOGIN=1` |
-| 401 / 710012001 | 会话已失效；`pnpm log-in` 重新扫码 |
+| `pnpm serve` 提示无有效登录态 | 运行 `pnpm log-in` 完成抖音授权，或设 `DOUBAO_AUTO_LOGIN=1` |
+| 401 / 710012001 | 会话已失效；`pnpm log-in` 重新授权 |
 | 429 / 710022004 | 触发风控人机验证；先在浏览器打开 `https://www.doubao.com` 完成验证，再试；必要时重新登录 |
 | 主端点总是回退 `/samantha` | 上游 `/chat/completion` 可能要求 `a_bogus`；`auto` 回退是预期行为，可设 `DOUBAO_CHAT_MODE=samantha` 固定 |
 | 换到别的机器 / 用户凭证解不开 | DPAPI 绑定本机本用户；需迁移就用 `DOUBAO_STORE_MODE=aes` + `DOUBAO_AUTH_SECRET` |
 | 端口被旧实例占用 | 启动时自动结束占用 `19071` 的旧进程（排除自身） |
-| 登录页端口被占用 | 自动改用随机端口，终端会打印实际 URL |
+| 登录回调端口被占用 | 自动改用随机端口，终端会打印实际回调 URL |
 | 豆包升级后请求异常 | 更新 `DOUBAO_PC_VERSION` / `DOUBAO_BOT_ID`，或调整 `DOUBAO_CHAT_MODE` |
 
 ## 安全说明
 
 - 插件只登录并使用**训练员本人**的豆包账号，不抓取、不复用他人凭证
-- 登录二维码由豆包官方 passport 接口签发，插件不经手账号口令
-- 凭证静态加密（DPAPI / AES）落盘；日志与诊断脚本不打印 Cookie / 二维码 token 明文
+- 登录授权页由抖音官方托管（`open.douyin.com`），插件不经手账号口令；本地只接收一次性 `code`
+- 凭证静态加密（DPAPI / AES）落盘；日志与诊断脚本不打印 Cookie / OAuth code / state 明文
 - `.env` 与凭证文件均已 gitignore，切勿提交任何密钥
 - 豆包网页登录没有 refresh token；插件不会尝试刷新或延长会话，失效即要求重新登录
 - `DOUBAO_COOKIES` 等价于账号密码，只建议临时使用；不要提交到仓库或写进命令行历史

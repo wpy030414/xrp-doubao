@@ -163,6 +163,48 @@ export async function startMockDoubao(): Promise<MockDoubao> {
     return json({ data: { error_code: 13, user_id: 0, description: '会话过期' }, message: 'error' });
   });
 
+  // 抖音 OAuth code 换取豆包会话（callback 走 bind_with_mobile_login）
+  app.post('/passport/web/auth/bind_with_mobile_login/', async (c) => {
+    const body = await c.req.parseBody().catch(() => ({} as any));
+    const code = String((body as any).code || '');
+    state.loginRequests.push(`bind:${code}`);
+    if (code === 'mock-douyin-code') {
+      return json(
+        { data: { user_id: 12345, user_name: '测试用户' }, message: 'success' },
+        200,
+        {
+          'Set-Cookie': 'sessionid=mock-session; Path=/; HttpOnly',
+        },
+      );
+    }
+    if (code === 'mock-douyin-needs-profile') {
+      return json({
+        data: { error_code: 1454, description: '需要二次校验', profile_key: 'mock-profile-key' },
+        message: 'error',
+      });
+    }
+    return json({ data: { error_code: 22, description: '非法应用', captcha: '' }, message: 'error' });
+  });
+
+  app.post('/passport/web/auth/login/', async (c) => {
+    const body = await c.req.parseBody().catch(() => ({} as any));
+    const profileKey = String((body as any).profile_key || '');
+    state.loginRequests.push(`login:${profileKey}`);
+    if (profileKey === 'mock-profile-key') {
+      return json(
+        { data: { user_id: 12345, user_name: '测试用户' }, message: 'success' },
+        200,
+        { 'Set-Cookie': 'sessionid=mock-session; Path=/; HttpOnly' },
+      );
+    }
+    return json({ data: { error_code: 1454, description: 'profile 无效' }, message: 'error' });
+  });
+
+  app.post('/passport/web/auth/get_oauth_token/', (c) => {
+    state.loginRequests.push('get_oauth_token');
+    return json({ data: { error_code: 1, description: '会话过期' }, message: 'error' });
+  });
+
   app.post('/chat/completion', async (c) => {
     let body: any = null;
     try {

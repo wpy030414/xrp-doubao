@@ -10,11 +10,17 @@
 
 | 用途 | 方法与路径 | 说明 |
 |---|---|---|
+| 抖音授权页 | `GET https://open.douyin.com/platform/oauth/connect?...` | 直接打开官方页面，展示真正的抖音授权二维码 |
+| 抖音二维码 | `GET https://open.douyin.com/oauth/get_qrcode/` | 页面内部使用；返回 base64 PNG + token |
+| 抖音轮询 | `GET https://open.douyin.com/oauth/check_qrcode/` | `new` / `scanned` / `confirmed` / `expired`；confirmed 带 `redirect_url` |
+| 本地回调 | `GET http://127.0.0.1:<port>/douyin/callback?code&state` | 抖音 OAuth 回跳本机 |
+| code 换会话 | `POST /passport/web/auth/bind_with_mobile_login/` | 用抖音 code 换豆包 sessionid |
+| 二次登录 | `POST /passport/web/auth/login/` | 返回 `profile_key` 时使用 |
 | 首页 / 基础 Cookie | `GET https://www.doubao.com/` | 302 到 `/chat/`，下发 `ttwid` |
 | CSRF | `GET /passport/safe/csrf_token/?aid=497858` | 返回 `passport_csrf_token` |
-| 二维码 | `GET /passport/web/get_qrcode/?next=...&aid=497858` | 返回 PNG + 一次性 token |
-| 轮询确认 | `GET /passport/web/check_qrconnect/?next=...&token=...&aid=497858` | `new` / `scanned` / `confirmed` / `expired` / `refused` |
-| 登录回跳 | `redirect_url`（通常是 `/passport/web/web_login_success`） | 下发 `sessionid` 等会话 Cookie |
+| 豆包扫码二维码 | `GET /passport/web/get_qrcode/?next=...&aid=497858` | 备用流程；返回 PNG + 一次性 token |
+| 豆包扫码轮询 | `GET /passport/web/check_qrconnect/?next=...&token=...&aid=497858` | 备用流程 `new` / `scanned` / `confirmed` / `expired` / `refused` |
+| 豆包扫码回跳 | `redirect_url`（通常是 `/passport/web/web_login_success`） | 下发 `sessionid` 等会话 Cookie |
 | 账号信息 | `GET /passport/account/info/v2/` | 浏览器会带 `a_bogus`；本插件不带，失败不阻断 |
 | 主对话 | `POST /chat/completion?<web params>` | SSE，支持模型模式 / 思考链 |
 | 回退对话 | `POST /samantha/chat/completion?<desktop params>` | SSE，旧版 / 兼容端点 |
@@ -22,32 +28,107 @@
 网页端自身通过 `www.doubao.com/passport/...` 同源代理访问 `accounts.doubao.com` 的 passport 服务。
 本插件统一请求 `www.doubao.com`，避免跨域 Cookie 与额外域名。
 
-## 2. 自包含网页扫码登录（已实测）
+## 2. 自包含网页 OAuth 登录（默认，已实测到授权页 / 回调）
 
-流程与豆包网页登录弹窗一致：
+默认登录不再由插件自己画二维码，而是**直接打开抖音官方授权页**，本地只接收 OAuth 回调：
+
+```
+浏览器打开：
+  https://open.douyin.com/platform/oauth/connect
+    ?client_key=aw4293rjg7ggbx9m&client_id=aw4293rjg7ggbx9m
+    &redirect_uri=http%3A%2F%2F127.0.0.1%3A19100%2Fdouyin%2Fcallback
+    &response_type=code&scope=user_info%2Cmobile&optionalScope=mobile%2C1
+    &state=<base64(JSON{entry,trackMeta,platform:"aweme_v2",navigatePath,type:"login",timestamp,csrfToken})>
+
+抖音页面展示官方授权二维码（也提供“验证码授权”）：
+  二维码解码结果：
+  aweme://authorizedy?client_key=aw4293rjg7ggbx9m
+    &scopes=user_info%2Cmobile&source=pc_auth
+    &token=<一次性 token>&optional_scope_check=mobile...
+  ← 这是真正的抖音 App 授权二维码，不是豆包下载码 / 豆包扫码登录码
+
+用户扫码或短信验证码授权后：
+  GET http://127.0.0.1:19100/douyin/callback?code=<one-time code>&state=<same state>
+  → 插件校验 state，用 code 调豆包 passport 换会话
+```
+
+### 2.1 授权页背后的接口（页面实测）
+
+抖音授权页自己会调用：
+
+```
+GET https://open.douyin.com/oauth/get_qrcode/
+    ?passport_jssdk_version=1.0.13&passport_jssdk_type=pro&aid=1128
+    &client_key=aw4293rjg7ggbx9m&scope=user_info,mobile
+    &next=https://www.doubao.com/auth/callback&state=<state>
+    &jump_type=native&optional_scope_check=mobile&optional_scope_uncheck=
+    &customize_params={"source":"pc_auth","not_skip_confirm":"true"}
+    → { data: { qrcode:"<base64 PNG>", token:"<...>_lf", error_code:0 }, message:"success" }
+
+GET https://open.douyin.com/oauth/check_qrcode/
+    ?<同上>&token=<token>&timestamp=<ms>
+    → { data: { status:"new"|"scanned"|"confirmed"|"expired",
+                redirect_url:"https://www.doubao.com/auth/callback?code=...&state=..." } }
+```
+
+- 直接调用 `get_qrcode` 不需要 ttwid / `a_bogus`；二维码解码为 `aweme://authorizedy?...`。
+- 官方页面在 `confirmed` 后会跳转 `redirect_url`；本插件把 `redirect_uri` 换成 localhost，因此回调直接落到本机。
+- `redirect_uri=localhost` 已被授权页接受（实测页面正常展示二维码），无需修改抖音开放平台配置。
+
+### 2.2 code 换豆包会话
+
+抖音回调只给 `code`。豆包网页 callback chunk（`web-auth_callback/page.c68b0cb1.js`）的实际逻辑是：
+
+```js
+passportApi.authLoginAutoBindMobile({
+  platform_app_id: 8949,
+  access_token: <query 里的 access_token>,
+  code: <query 里的 code>,
+  extra_params: <platform config.extraParams>
+}, 'aweme_v2')
+```
+
+`authLoginAutoBindMobile` 先调：
+
+```
+POST https://www.doubao.com/passport/web/auth/bind_with_mobile_login/
+  ?aid=497858&real_aid=497858&pkg_type=release_version&version_code=20800
+  &device_platform=web&language=zh&account_app_language=zh-CN
+  &passport_jssdk_version=4.4.6&passport_jssdk_type=normal
+  &is_from_ttaccountsdk=1&multi_login=1&account_sdk_source=web&ts=<sec>
+  x-tt-passport-csrf-token: <passport_csrf_token>
+  Content-Type: application/x-www-form-urlencoded
+  code=<code>&platform_app_id=8949&platform=aweme_v2
+  → Set-Cookie: sessionid / uid_tt / ...
+```
+
+若返回 `profile_key`（需要二次校验 / 绑定），再调：
+
+```
+POST /passport/web/auth/login/
+  profile_key=<profile_key>&platform_app_id=8949
+```
+
+> 实测（2026-10-25）：`bind_with_mobile_login` 用假 code 返回 `error_code:22「非法应用」`，说明端点存活且会校验 code / 应用；真实 code 的换票结果由 `pnpm log-in` 验证。
+
+### 2.3 备用：豆包扫码登录（`DOUBAO_LOGIN_FLOW=doubao`）
+
+插件仍保留豆包网页登录弹窗同款流程：
 
 ```
 GET  /                                   → Set-Cookie: ttwid
 GET  /passport/safe/csrf_token/?aid=497858 → passport_csrf_token
 GET  /passport/web/get_qrcode/?next=...&aid=497858
-     headers: x-tt-passport-csrf-token: <csrf>
-     → { data: { error_code:0, token:"<...>_lq", qrcode:"data:image/png;base64,...",
-                 expire_time:<unix seconds>, qrcode_index_url:"..." }, message:"success" }
+     → { data: { token:"<...>_lq", qrcode:"data:image/png;base64,...", expire_time } }
 GET  /passport/web/check_qrconnect/?next=...&token=...&aid=497858
-     → new → scanned → confirmed
-     confirmed 时 data.redirect_url 指向登录回跳
+     → new → scanned → confirmed（confirmed 带 redirect_url）
 GET  {redirect_url}                      → Set-Cookie: sessionid / uid_tt / passport_csrf_token ...
 ```
 
-关键观察：
-
-1. **纯 HTTP 可用**：CSRF + 二维码 + 轮询不需要浏览器 JS 或 `a_bogus`；本插件因此不需要 Playwright / 无头浏览器。
-2. `qrcode` 是 `data:image/png;base64,...` 形式的 PNG；`token` 每次不同，后缀会变化（实测见过 `_lf` / `_lq`）。
-3. `expire_time` 是 **Unix 秒**；二维码约 2 分钟有效。
-4. `check_qrconnect` 在二维码过期时可能返回 `status:"expired"`，也可能返回非 0 `error_code` + 描述；插件两者都识别。
-5. 手机确认后，`confirmed` 响应携带 `redirect_url`；**必须跟随回跳**才能收集完整会话 Cookie（`sessionid` 等）。
-6. 登录 Cookie 落在 `www.doubao.com` / `.doubao.com`；`sessionid` 是 HttpOnly。
-7. 登录页由豆包官方托管，插件不经手手机号、验证码或密码。
+这个二维码解码后是 `https://zjsms.com/<short>/` → 302 →
+`https://www.doubao.com/flow-account/scan-login?...token=...`，`get_qrcode` 的 `copywriting` 明确写着
+“请使用「抖音 APP」扫码验证”。它也是官方登录码，但属于**豆包账号扫码验证**，不是抖音 OAuth 授权码。
+两条链路都不读取豆包电脑版。
 
 登录前浏览器常见 Cookie 名称（只记录名称）：
 

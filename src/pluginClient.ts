@@ -25,13 +25,13 @@ export function registeredModels(): RegisteredModel[] {
   return ids.map((id) => ({ model_id: id, display_name: id, tier: 'custom' }));
 }
 
-export function buildRegisterPayload(): any {
+export function buildRegisterPayload(port = settings.port): any {
   return {
     type: 'register',
     plugin_id: PLUGIN_ID,
     provider: {
       kind: 'chat_completions',
-      base_url: `http://localhost:${settings.port}`,
+      base_url: `http://localhost:${port}`,
       api_path: '/v1/chat/completions',
     },
     models: registeredModels(),
@@ -46,7 +46,7 @@ export class PluginClient {
   private reconnectAttempts = 0;
   private started = false;
 
-  constructor() {
+  constructor(private readonly port = settings.port) {
     void this.bootstrap();
   }
 
@@ -83,7 +83,7 @@ export class PluginClient {
   }
 
   private sendRegister(): void {
-    const payload = buildRegisterPayload();
+    const payload = buildRegisterPayload(this.port);
     this.send(payload);
     console.log(`[PluginClient] Registered ${payload.models.length} models as ${PLUGIN_ID}`);
   }

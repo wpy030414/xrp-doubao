@@ -10,13 +10,14 @@
 
 与 xrp-workbuddy 的关键差异：
 
-- 豆包网页登录是**二维码登录**，不是 OAuth state/token 换票；没有 refresh token。
+- 豆包网页登录存在两种官方链路：**抖音 OAuth 授权页**（默认，`open.douyin.com`，本地回调）与豆包自带扫码登录；两者都没有 refresh token。
+- 抖音 OAuth 的 `client_key`、授权页、二维码与 callback 都能从豆包网页登录弹窗中观测到；本插件直接复用官方页面，不自己伪造二维码。
 - 豆包对话协议是私有 SSE，需要把内容块 / 思考分隔符翻译成 OpenAI chunk。
 - 网页端请求带一整套设备参数；主端点可能要求 `a_bogus`，需要可回退的兼容端点。
 
 ## 2. 目标
 
-1. **自包含网页登录**：插件自己申请二维码、托管本机登录页、轮询确认、收集 Cookie；不依赖、不读取豆包电脑版。
+1. **自包含网页 OAuth 登录**：直接打开抖音官方授权页，本机接收回调 `code`，用 code 调豆包 passport 换会话 Cookie；不依赖、不读取豆包电脑版。
 2. **OpenAI Chat Completions 兼容**：支持流式与非流式；正文 + `reasoning_content`。
 3. **模型模式映射**：快速 / 专家 / 工作任务 / 2.1 Lite 等模式可通过模型别名选择，思考强度可调。
 4. **凭证安全**：Cookie 与设备指纹静态加密；日志不泄露凭证。
@@ -37,7 +38,7 @@
 
 ## 4. 用户故事
 
-1. 作为本机用户，我运行 `pnpm log-in`，浏览器打开本机登录页，看到二维码；用手机扫码确认后，凭证自动加密保存。
+1. 作为本机用户，我运行 `pnpm log-in`，浏览器直接打开抖音官方授权页；我扫码或输入短信验证码授权后，抖音回跳本机，凭证自动加密保存。
 2. 作为本机用户，我运行 `pnpm serve`，xrl-router 中出现 `plugin-doubao` 的模型；我用 OpenAI 客户端调用 `doubao-fast` 得到流式回答。
 3. 作为 Claude Code 用户，我通过 xrl-router 的 Anthropic 转换调用本插件，正文与 thinking 块正确出现。
 4. 作为运维者，我调用 `/health` 看到登录状态、模型列表、`needs_captcha`；风控时我完成浏览器验证后调用 `/admin/reset-captcha`。
@@ -45,12 +46,13 @@
 
 ## 5. 功能需求
 
-### FR-1 网页扫码登录
+### FR-1 抖音 OAuth 网页登录
 
-- 请求 CSRF、二维码、轮询确认；本机页面展示二维码与状态
-- 支持刷新二维码；过期 / 拒绝 / 网络波动不误判为成功
-- 确认后跟随 `redirect_url` 收集 Cookie；尽力取账号信息
+- 默认 `DOUBAO_LOGIN_FLOW=douyin`：生成一次性 state，直接打开抖音官方授权页
+- `redirect_uri` 指向本机 `127.0.0.1:<port>/douyin/callback`；页面由抖音托管，用户扫码或短信验证码授权
+- 回调校验 state；用 code 调 `bind_with_mobile_login` 换豆包会话；必要时走 `profile_key` 二次登录
 - 超时（默认 5 分钟）返回明确错误
+- 备用 `DOUBAO_LOGIN_FLOW=doubao`：本机展示豆包网页登录二维码，轮询确认
 - 不读取任何豆包电脑版文件
 
 ### FR-2 凭证
@@ -96,10 +98,11 @@
 
 | 检查点 | 语义 |
 |---|---|
-| 二维码 token 是一次性登录凭据 | 不把 token 当会话 Cookie 使用；只在轮询中使用 |
-| 扫码确认是账号本人在手机端完成 | 插件不经手口令；不伪造确认 |
-| 登录成功以 `sessionid` 等会话 Cookie 落地为准 | 不以“二维码被扫”或“接口 200”误判 |
-| 二维码过期 / 拒绝可通过刷新恢复 | 不结束等待，不静默失败 |
+| 授权页是抖音官方页面 | `open.douyin.com/platform/oauth/connect`，二维码解码为 `aweme://authorizedy?...` |
+| OAuth code 只能换一次会话 | 不把 code 当长期凭证；换票后只保留 Cookie |
+| state 必须匹配本次登录 | 不采纳其它来源的 code / state |
+| 登录成功以 `sessionid` 等会话 Cookie 落地为准 | 不以“授权页 200”或“code 返回”误判 |
+| 超时 / 拒绝可重试 | 不静默失败 |
 | 不读取电脑版 | 代码中不存在 App 文件路径 / 解密逻辑 |
 
 ### 6.2 对话语义
@@ -120,8 +123,9 @@
 | Cookie 罐域 / 路径 / 过期 | `test/e2e.test.ts` |
 | 凭证 AES / plain 往返 | 同上 |
 | 登录 new → scanned → confirmed → Cookie → 账号 | 同上 |
-| 登录页二维码 / 状态 / 刷新 | 同上 |
-| 二维码过期可刷新、不误判 | 同上 |
+| 抖音 OAuth 授权 URL / 本地回调 / code 换会话 | 同上 |
+| state 不匹配 / 非法 code / profile_key 回退 / 超时 | 同上 |
+| 备用豆包扫码登录 / 登录页二维码 / 状态 / 刷新 | 同上 |
 | 登录超时 | 同上 |
 | 认证状态 / 账号查询 / 强制重登 | 同上 |
 | 流式正文 + thinking + usage + 模型映射 | 同上 |

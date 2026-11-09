@@ -94,6 +94,7 @@ async function startChat(
     stream: body.stream === true,
     reasoningEffort: reasoningEffortOf(body),
     signal,
+    stopAfterSearch: body?.stop_after_search === true,
     onMode: (m) => {
       mode = m;
     },

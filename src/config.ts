@@ -197,6 +197,12 @@ export interface Settings {
   // —— 思考展示 ——
   emitThinkingSummary: boolean;
 
+  // —— 联网搜索（/v1/search）——
+  /** 搜索端点等待 10025 的最长时间；超过则返回已拿到的结果 */
+  searchTimeoutMs: number;
+  /** 搜索时使用的模型别名（默认专家，意图识别更稳） */
+  searchModel: string;
+
   // —— 模型注册 ——
   availableModels: string[];
 
@@ -270,6 +276,9 @@ export const settings: Settings = {
   cleanupTimeoutMs: Math.max(1000, envInt('DOUBAO_CLEANUP_TIMEOUT_MS', 10000)),
 
   emitThinkingSummary: envBool('DOUBAO_THINKING_SUMMARY', true),
+
+  searchTimeoutMs: Math.max(5000, envInt('DOUBAO_SEARCH_TIMEOUT_MS', 45000)),
+  searchModel: env('DOUBAO_SEARCH_MODEL', 'doubao-expert'),
 
   availableModels: (process.env.DOUBAO_MODELS || '')
     .split(',')

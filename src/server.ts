@@ -11,6 +11,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { settings } from './config';
 import { forwardChatCompletions } from './openai';
+import { runSearch } from './search';
 import { getAuthStatus, initTokenManager } from './auth';
 import { getNeedsCaptcha, resetCaptcha } from './doubaoClient';
 import { getCleanupStats } from './conversationCleanup';
@@ -30,6 +31,7 @@ export function createApp(): Hono {
       models: registeredModels().map((m) => m.display_name),
       endpoints: {
         chat: '/v1/chat/completions',
+        search: '/v1/search',
         health: '/health',
         resetCaptcha: '/admin/reset-captcha',
       },
@@ -63,6 +65,16 @@ export function createApp(): Hono {
       return c.json({ error: { message: '请求体必须是合法 JSON', type: 'invalid_request_error' } }, 400);
     }
     return forwardChatCompletions(body, c);
+  });
+
+  app.post('/v1/search', async (c) => {
+    let body: any;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: { message: '请求体必须是合法 JSON', type: 'invalid_request_error' } }, 400);
+    }
+    return runSearch(body, c);
   });
 
   return app;

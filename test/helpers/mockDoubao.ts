@@ -22,7 +22,8 @@ export type ChatBehavior =
   | 'http400'
   | 'html200'
   | 'legacyDelimiter'
-  | 'thinkingSummary';
+  | 'thinkingSummary'
+  | 'search';
 export type QrMode = 'normal' | 'expired' | 'refused' | 'alwaysNew';
 
 export interface MockState {
@@ -430,6 +431,23 @@ export async function startMockDoubao(): Promise<MockDoubao> {
         'data: {"content_block":[{"block_type":10000,"content":{"text_block":{"text":"答案"}}}]}\n\n',
         'data: {"content_block":[{"block_type":10040,"content":{"thinking_block":{"finish_title":"推理步骤二","streaming_title":"推理步骤二"}}}]}\n\n',
         'data: {"content_block":[{"block_type":10000,"content":{"text_block":{"text":"完成"}}}]}\n\n',
+        'event: SSE_REPLY_END\n',
+        'data: {"end_type":1}\n\n',
+      ]);
+    }
+    if (behavior === 'search') {
+      return sseResponse([
+        ': heartbeat\n\n',
+        'event: SSE_ACK\n',
+        'data: {"ack_client_meta":{"conversation_id":"mock-conv-search"}}\n\n',
+        'event: STREAM_MSG_NOTIFY\n',
+        'data: {"content":{"content_block":[{"block_type":10101,"block_id":"load-1","content":{"loading_block":{"scene":2,"text_loading":{"text":"正在搜索"}}},"is_finish":false}]},"ext":{"llm_intention":"browsing","has_search_tool":"1"}}\n\n',
+        'event: STREAM_CHUNK\n',
+        'data: {"patch_op":[{"patch_object":1,"patch_type":1,"patch_value":{"content_block":[{"block_type":10101,"block_id":"load-1","content":{"loading_block":{"scene":2,"text_loading":{"text":"找到 6 篇资料"}}},"is_finish":true}]}}]}\n\n',
+        'event: STREAM_CHUNK\n',
+        'data: {"patch_op":[{"patch_object":1,"patch_type":1,"patch_value":{"content_block":[{"block_type":10025,"block_id":"search-1","content":{"search_query_result_block":{"summary":"搜索 1 个关键词，参考 2 篇资料","queries":["测试问题"],"results":[{"text_card":{"id":1,"title":"资料甲","url":"https://example.com/a","doc_id":"doc-a","index":1,"search_id":"sid-1"}},{"text_card":{"id":2,"title":"资料乙","url":"https://example.com/b","doc_id":"doc-b","original_doc_rank":1,"index":2,"search_id":"sid-1"}}],"scene":2,"search_type":1}},"is_finish":true,"patch_type":2}]}}]}\n\n',
+        'event: STREAM_CHUNK\n',
+        'data: {"patch_op":[{"patch_object":1,"patch_type":1,"patch_value":{"content_block":[{"block_type":10000,"block_id":"text-1","content":{"text_block":{"text":"不应出现"}},"is_finish":false,"patch_type":1}]}}]}\n\n',
         'event: SSE_REPLY_END\n',
         'data: {"end_type":1}\n\n',
       ]);

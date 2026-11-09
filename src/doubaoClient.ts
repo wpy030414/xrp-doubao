@@ -60,12 +60,39 @@ export class DoubaoUpstreamError extends Error {
   }
 }
 
+/** 豆包联网搜索命中的单条资料（来自 block_type=10025 的 text_card） */
+export interface SearchSource {
+  /** 上游给的全局序号（跨查询递增） */
+  index: number;
+  /** 单条查询内的原始排序（有则保留） */
+  originalDocRank?: number;
+  title: string;
+  url: string;
+  /** 上游文档 id，用于去重与溯源 */
+  docId?: string;
+  /** 该资料所属的搜索批次 id */
+  searchId?: string;
+}
+
+/** 一次联网搜索的聚合结果（block_type=10025 整体） */
+export interface SearchResult {
+  /** 上游摘要，例如「搜索 2 个关键词，参考 12 篇资料」 */
+  summary?: string;
+  /** 上游实际改写/扩展出的查询词 */
+  queries?: string[];
+  sources: SearchSource[];
+}
+
 export interface ChatDelta {
   text?: string;
   reasoning?: string;
   usage?: any;
   conversationId?: string;
   done?: boolean;
+  /** 搜索进度文案（block_type=10101，「正在搜索」「找到 6 篇资料」） */
+  searchProgress?: string;
+  /** 联网搜索结果（block_type=10025 首次出现时下发一次） */
+  search?: SearchResult;
 }
 
 export interface ChatRequest {
@@ -77,6 +104,8 @@ export interface ChatRequest {
   onMode?: (mode: ChatMode) => void;
   /** 发生静默回退时回调（用于响应头 / 日志） */
   onFallback?: (reason: string) => void;
+  /** 搜索模式：拿到 10025 后立即结束，不生成正文（供 /v1/search 使用） */
+  stopAfterSearch?: boolean;
 }
 
 const RISK_CODES = new Set([710022001, 710022002, 710022003, 710022004, 710022005, 710022006]);
@@ -133,6 +162,10 @@ interface ParseState {
   conversationId: string;
   /** 最近一次已展示的思考步骤标题，避免重复 */
   lastThinkingTitle: string;
+  /** 已下发的搜索资料 id（按 doc_id / card id 去重） */
+  seenSourceIds: Set<string>;
+  /** 是否已经下发过 10025 结果 */
+  searchEmitted: boolean;
 }
 
 export class DoubaoClient {
@@ -199,6 +232,8 @@ export class DoubaoClient {
       thinkDelimiters: 0,
       conversationId: '',
       lastThinkingTitle: '',
+      seenSourceIds: new Set(),
+      searchEmitted: false,
     };
     let sawDone = false;
     let bodyClosed = false;
@@ -216,6 +251,19 @@ export class DoubaoClient {
             break;
           }
           if (d.conversationId && !state.conversationId) state.conversationId = d.conversationId;
+          if (d.search) {
+            yield d;
+            if (req.stopAfterSearch) {
+              // 搜索模式：来源已到手，不再等待正文生成
+              sawDone = true;
+              break;
+            }
+            continue;
+          }
+          if (d.searchProgress) {
+            yield d;
+            continue;
+          }
           if (d.text || d.reasoning || d.usage) yield d;
         }
         if (sawDone) break;
@@ -728,8 +776,56 @@ export class DoubaoClient {
         }
         return;
       }
-      if (bt === 10024 || bt === 10025 || bt === 10101 || bt === 10052) {
-        return; // 工具/搜索/附件块：当前不映射为正文
+      if (bt === 10101) {
+        // 搜索/工具 loading 块：只取进度文案，不当作正文
+        const loading = content?.loading_block;
+        const text = pickString(
+          loading?.text_loading?.text,
+          loading?.text,
+          content?.text_block?.text,
+        );
+        if (text) out.push({ searchProgress: text });
+        return;
+      }
+      if (bt === 10025) {
+        // 联网搜索结果块：results[].text_card 带 title/url/doc_id/original_doc_rank
+        const block = content?.search_query_result_block;
+        if (block) {
+          const sources: SearchSource[] = [];
+          for (const item of Array.isArray(block.results) ? block.results : []) {
+            const card = item?.text_card;
+            const url = pickString(card?.url);
+            const title = pickString(card?.title);
+            if (!url || !title) continue;
+            const dedupeKey = pickString(card?.doc_id, String(card?.id ?? ''), url);
+            if (state.seenSourceIds.has(dedupeKey)) continue;
+            state.seenSourceIds.add(dedupeKey);
+            sources.push({
+              index: numberOrUndefined(card?.index) ?? sources.length + 1,
+              originalDocRank: numberOrUndefined(card?.original_doc_rank),
+              title,
+              url,
+              docId: pickString(card?.doc_id) || undefined,
+              searchId: pickString(card?.search_id) || undefined,
+            });
+          }
+          const summary = pickString(block.summary) || undefined;
+          const queries = Array.isArray(block.queries)
+            ? block.queries.filter((q: unknown): q is string => typeof q === 'string' && !!q)
+            : undefined;
+          // 即使 sources 为空也下发一次，便于上层区分「搜了但没结果」
+          if (!state.searchEmitted) {
+            state.searchEmitted = true;
+            out.push({ search: { summary, queries, sources } });
+          } else if (sources.length > 0) {
+            // 后续批次追加结果（多查询分批下发）
+            out.push({ search: { sources } });
+          }
+        }
+        return;
+      }
+      if (bt === 10024 || bt === 10052) {
+        return; // 工具/附件块：当前不映射为正文
       }
       // 未知块：只抓明显的 think/text 字段，避免把结构化内容当成正文
       if (pushThinking(content)) return;

@@ -860,6 +860,77 @@ test('OpenAI HTTP E2E：非流式 / 流式 / 错误映射 / 健康检查', async
   }
 });
 
+test('搜索解析：10101 进度文案 + 10025 资料块，正文不外泄', async () => {
+  mock.reset();
+  mock.state.chatBehavior = 'search';
+  const state = seedSession();
+  const client = new mods.client.DoubaoClient(state);
+  const { chunks } = await collectChunks(client, {
+    model: 'doubao-expert',
+    stream: true,
+    stopAfterSearch: true,
+    messages: [{ role: 'user', content: '测试问题' }],
+  });
+
+  const progress = chunks.map((c: any) => c.searchProgress).filter(Boolean);
+  assert.deepEqual(progress, ['正在搜索', '找到 6 篇资料']);
+
+  const search = chunks.find((c: any) => c.search)?.search;
+  assert.ok(search, '应下发 search 结果');
+  assert.equal(search.summary, '搜索 1 个关键词，参考 2 篇资料');
+  assert.deepEqual(search.queries, ['测试问题']);
+  assert.equal(search.sources.length, 2);
+  assert.equal(search.sources[0].title, '资料甲');
+  assert.equal(search.sources[0].url, 'https://example.com/a');
+  assert.equal(search.sources[0].docId, 'doc-a');
+  assert.equal(search.sources[1].originalDocRank, 1);
+
+  // stopAfterSearch：拿到结果即收尾，正文不得出现
+  const text = chunks.map((c: any) => c.text || '').join('');
+  assert.equal(text, '');
+});
+
+test('搜索端点：/v1/search 返回结构化来源', async () => {
+  mock.reset();
+  mock.state.chatBehavior = 'search';
+  seedSession();
+  const started = await mods.server.startServer({ port: 0, connectRouter: false });
+  const base = `http://127.0.0.1:${started.port}`;
+  try {
+    const res = await fetch(base + '/v1/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: '测试问题' }),
+    });
+    assert.equal(res.status, 200);
+    const json: any = await res.json();
+    assert.equal(json.query, '测试问题');
+    assert.equal(json.searched, true);
+    assert.equal(json.summary, '搜索 1 个关键词，参考 2 篇资料');
+    assert.deepEqual(json.queries, ['测试问题']);
+    assert.equal(json.results.length, 2);
+    assert.equal(json.results[0].title, '资料甲');
+    assert.equal(json.results[0].url, 'https://example.com/a');
+    assert.equal(json.results[1].index, 2);
+
+    // 上游必须收到搜索诱导 prompt
+    const req = mock.state.chatRequests.at(-1)!;
+    const prompt = req.body.messages[0].content_block[0].content.text_block.text;
+    assert.match(prompt, /联网搜索/);
+    assert.match(prompt, /测试问题/);
+
+    // 缺少查询 → 400
+    const bad = await fetch(base + '/v1/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    assert.equal(bad.status, 400);
+  } finally {
+    await started.close();
+  }
+});
+
 test('插件注册载荷：V24 无 keys，display_name 唯一', () => {
   const payload = mods.plugin.buildRegisterPayload();
   assert.equal(payload.type, 'register');

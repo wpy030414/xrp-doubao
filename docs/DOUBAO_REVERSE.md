@@ -336,9 +336,50 @@ data: {"error_code":710022004,"error_msg":"rate limited","extra":{"decision":"{\
 | 10001 / 2001 / 2003 | 文本兼容块 | 作为正文 |
 | 2008 | 旧版思考文本 | `content.think` → reasoning |
 | 10024 | 通用工具块 | 忽略（当前不映射 tool_calls） |
-| 10025 | 搜索结果块 | 忽略 |
-| 10101 | loading 块 | 忽略 |
+| 10025 | 搜索结果块 | `content.search_query_result_block` → `ChatDelta.search`（见下）；`/v1/search` 的主要数据源 |
+| 10101 | loading 块 | `content.loading_block.text_loading.text` → `ChatDelta.searchProgress` |
 | 10052 | 附件块 | 入参侧构造；出参侧当前忽略 |
+
+#### 10025 联网搜索结果块（2026-11 实测）
+
+触发方式**不是请求参数**：豆包自己判断意图（`STREAM_MSG_NOTIFY` 的 ext 里出现
+`llm_intention: "browsing"` / `has_search_tool: "1"` 即表示本轮会联网）。
+同一轮里先出现 `10101` 进度块（「正在搜索」→「找到 N 篇资料」），再出现一次
+`10025` 结果块：
+
+```json
+{
+  "block_type": 10025,
+  "content": {
+    "search_query_result_block": {
+      "summary": "搜索 2 个关键词，参考 12 篇资料",
+      "queries": ["蔡徐坤死了吗", "蔡徐坤最新消息"],
+      "results": [
+        {
+          "text_card": {
+            "id": 10620915451655682,
+            "title": "…… - 中国娱乐网",
+            "url": "http://news.yule.com.cn/html/202506/357469.html",
+            "doc_id": "f26e929453570437-6c5f94e98e41df55",
+            "index": 1,
+            "original_doc_rank": 1,
+            "search_id": "202611091624234031677E4D85992708B3"
+          }
+        }
+      ],
+      "scene": 2,
+      "search_type": 1,
+      "extend_fields": { "thinking_idx": 2 }
+    }
+  }
+}
+```
+
+- **只有标题和 URL**，没有正文/摘要；要内容需自行 `web_fetch` 目标页。
+- `results[].text_card.index` 是跨查询递增的全局序号，`original_doc_rank` 只在部分条目出现。
+- 按 `doc_id`（缺省时用 `id` 或 `url`）去重；多批次会追加下发。
+- 风控概率高于普通对话，`/v1/search` 建议配合超时与降级。
+
 
 插件同时兼容 `content_block`、`patch_op.patch_value.content_block`、`patch_op.patch_value.content`（JSON 字符串）三种承载方式。
 

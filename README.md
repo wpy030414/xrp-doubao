@@ -63,7 +63,33 @@ curl -s http://127.0.0.1:19071/v1/chat/completions \
 curl -sN http://127.0.0.1:19071/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"doubao-expert","stream":true,"messages":[{"role":"user","content":"Say ok."}]}'
+
+# 联网搜索：直接返回豆包检索到的资料来源（标题 + URL）
+curl -s http://127.0.0.1:19071/v1/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"今天有什么科技新闻"}'
 ```
+
+`POST /v1/search` 请求：`{ "query": "…", "model": "doubao-expert"? }`（也可用
+`messages` 传 OpenAI 格式，取最后一条 user 文本）。返回：
+
+```json
+{
+  "query": "…",
+  "searched": true,
+  "summary": "搜索 2 个关键词，参考 12 篇资料",
+  "queries": ["…", "…"],
+  "results": [{ "index": 1, "title": "…", "url": "https://…", "docId": "…" }],
+  "mode": "web"
+}
+```
+
+注意：
+
+- 豆包**没有搜索开关**，是否联网由模型意图决定；本端点用 prompt 引导进入
+  browsing 意图，`searched: false` 表示本轮未触发联网（可重试或换 `DOUBAO_SEARCH_MODEL`）。
+- 拿到结果立即中断上游流，**不生成正文**：省 token、降低风控面。
+- 结果只有标题与链接，没有正文；需要内容请对 `url` 自行抓取。
 
 真实账号冒烟（会消耗一次额度，必须显式确认）：
 
@@ -123,6 +149,8 @@ pnpm smoke -- --yes --model doubao-expert --prompt "请用一句话解释为什�
 | `DOUBAO_UID` | 空 | 灾备账号 uid（仅展示） |
 | `DOUBAO_DEVICE_ID` / `DOUBAO_WEB_ID` / `DOUBAO_FP` | 空 | 覆盖设备指纹；留空则登录时生成并随凭证保存 |
 | `DOUBAO_DEBUG` | `0` | 打印登录 / 回退调试日志（不含凭证值） |
+| `DOUBAO_SEARCH_MODEL` | `doubao-expert` | `/v1/search` 使用的模型别名（专家模式意图识别更稳） |
+| `DOUBAO_SEARCH_TIMEOUT_MS` | `45000` | `/v1/search` 等待 10025 的最长时间（不超过请求超时） |
 
 ## 登录与凭证
 
